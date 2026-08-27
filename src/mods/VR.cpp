@@ -1649,6 +1649,38 @@ void VR::update_action_states() {
         actively_using_controller = true;
     }
 
+    // Moving a controller counts as using it, not just pressing something on it.
+    //
+    // The timestamp above is the only thing is_using_controllers looks at, so with button
+    // presses as its sole source a player who holds the controllers without pressing
+    // anything is taken to have put them down once the inactivity timer expires. Every
+    // consumer of is_using_controllers then shuts off, and UObjectHook attachments are
+    // among them: tick_attachments returns early, so an attached weapon stops being
+    // placed and hangs in the world while the hand it belongs to keeps moving.
+    //
+    // Movement is the test rather than mere pose validity, because the timer is there to
+    // notice controllers being set aside in favour of a gamepad, and a controller left on
+    // a desk still reports a valid pose. It does not report motion though, while one held
+    // in a hand never stops moving.
+    if (!actively_using_controller && !m_controllers.empty()) {
+        const auto speed_of = [this](uint32_t index) {
+            const auto velocity = get_velocity(index);
+
+            return glm::length(glm::vec3{velocity.x, velocity.y, velocity.z});
+        };
+
+        // Metres per second. Well above what a controller lying on a surface reports and
+        // well below the drift of a hand trying to hold still.
+        constexpr auto motion_threshold = 0.02f;
+
+        if (speed_of(get_left_controller_index()) >= motion_threshold ||
+            speed_of(get_right_controller_index()) >= motion_threshold)
+        {
+            m_last_controller_update = std::chrono::steady_clock::now();
+            actively_using_controller = true;
+        }
+    }
+
     const auto last_xinput_update_is_late = std::chrono::steady_clock::now() - m_last_xinput_update >= std::chrono::seconds(2);
     const auto should_be_spoofing = (actively_using_controller || get_runtime()->handle_pause);
 
