@@ -141,9 +141,18 @@ public:
             }
         }
 
-        std::unique_lock _{m_mutex};
-        auto result = std::make_shared<MotionControllerState>();
-        return m_motion_controller_attached_components[component] = result;
+        std::shared_ptr<MotionControllerState> result{};
+
+        {
+            std::unique_lock _{m_mutex};
+            result = std::make_shared<MotionControllerState>();
+            m_motion_controller_attached_components[component] = result;
+        }
+
+        // Attachment diagnostics. Defined in the .cpp because this header has access
+        // to neither SPDLOG nor utility::narrow. Called outside the lock, because it
+        // takes a shared_lock on the same m_mutex internally.
+        log_new_motion_controller_state(component);
 
         return result;
     }
@@ -176,6 +185,110 @@ private:
     bool exists_unsafe(sdk::UObjectBase* object) const {
         return m_objects.contains(object);
     }
+
+    // Logs that a motion controller state was created and, more importantly, whether
+    // the component is tracked at all. Defined in the .cpp, there is no SPDLOG here.
+    void log_new_motion_controller_state(sdk::USceneComponent* component);
+
+    // A catch-up sweep over FUObjectArray.
+    //
+    // Hooking the UObjectBase constructor does not catch every creation: the compiler
+    // inlined the constructor into more than one caller, and the level loading path
+    // uses its own inlined copy. Loading a save makes this obvious at once -- the
+    // number of tracked objects drops to a third of what the engine array holds, and
+    // fresh components fail exists() and therefore never receive their attachments.
+    //
+    // The engine's object array is authoritative, so it can be used to catch up on
+    // whatever was missed. The work is capped per frame to avoid hitches.
+    void reconcile_with_uobjectarray();
+
+    // How far the tail of the array has been examined. Fresh objects are appended at
+    // the end, so scanning the tail keeps the common case instant.
+    int32_t m_reconcile_known_count{0};
+
+    // Cursor for the ring sweep. Needed because the engine reuses the indices of
+    // freed slots, so a new object can appear in the middle of the array too.
+    int32_t m_reconcile_cursor{0};
+
+    // -----------------------------------------------------------------------
+    // The engine's own notification mechanism, instead of a hook.
+    //
+    // Disassembling a dump of the game image showed there is nothing to hook: both
+    // UObjectBase::AddObject and FUObjectArray::AllocateUObjectIndex are inlined
+    // straight into the UObjectBase constructor, and the constructor itself is inlined
+    // into some of its callers. Hence the incompleteness: 43% of creations were
+    // measured to slip past the hook.
+    //
+    // The engine does have its own notification point though -- FUObjectCreateListener.
+    // In this build the dispatch loop looks like this:
+    //     mov rax, [GUObjectArray+0x68]   ; UObjectCreateListeners.Data
+    //     mov r8d, index                  ; third argument
+    //     mov rdx, object                 ; second argument
+    //     mov rcx, [rax + i*8]            ; the listener itself
+    //     call [[rcx] + 8]                ; the SECOND vtable slot
+    //     cmp ebx, [GUObjectArray+0x70]   ; Num
+    // The slot is the second one because a virtual destructor occupies slot zero.
+    //
+    // Such notification is complete by construction and instant, and it does not
+    // depend on what the optimiser inlined where.
+    // -----------------------------------------------------------------------
+    // Shared handler bodies, so the two vtable layouts below do not duplicate them.
+    static void on_uobject_created(void* object);
+    static void on_uobject_array_shutdown_impl();
+
+    // The vtable layout of FUObjectCreateListener depends on the UE version: if the
+    // interface has a virtual destructor it takes slot zero and Notify becomes the
+    // second entry, otherwise Notify is first. The right variant is picked at runtime
+    // from the offset derived out of the dispatch code. Getting this wrong would mean
+    // the engine calling the wrong method, so both layouts are kept instead of
+    // guessing one.
+
+    // Notify at offset +0x8: slot zero is taken by the destructor.
+    struct CreateListenerWithDtor {
+        virtual ~CreateListenerWithDtor() = default;                      // slot 0
+        virtual void notify_uobject_created(void* object, int32_t index); // slot 1
+        virtual void on_uobject_array_shutdown();                         // slot 2
+    };
+
+    // Notify at offset 0: no destructor in the vtable.
+    struct CreateListenerNoDtor {
+        virtual void notify_uobject_created(void* object, int32_t index); // slot 0
+        virtual void on_uobject_array_shutdown();                         // slot 1
+    };
+
+    // Derives the dispatch layout from the game's code: the offset of
+    // TArray<FUObjectCreateListener*> inside FUObjectArray, and the offset of
+    // NotifyUObjectCreated in the listener's vtable.
+    //
+    // Needs no private knowledge of UESDK: the only input is the address of
+    // GUObjectArray, which UESDK exposes publicly. That keeps this part self-contained.
+    bool derive_create_listener_layout();
+
+    void try_register_create_listener();
+    void unregister_create_listener();
+
+    // The derived result. Zero is a legal value for notify_offset (the method is first
+    // in the vtable), so a separate flag tracks whether a result exists at all.
+    uint32_t m_create_listeners_offset{0};
+    uint32_t m_create_listener_notify_offset{0};
+    bool m_create_listener_layout_known{false};
+
+    CreateListenerWithDtor m_create_listener_with_dtor{};
+    CreateListenerNoDtor m_create_listener_no_dtor{};
+
+    // Backing storage for the listener array. Ours, because GMalloc is not found in
+    // this game ("[FMalloc::get] Failed to find GMalloc" in the log), so allocating
+    // through the engine's allocator is not an option. Sized with room to spare, so
+    // that another subsystem registering its own listener does not reallocate our
+    // pointer out from under the engine.
+    static constexpr int32_t LISTENER_SLOTS = 8;
+    void* m_listener_slots[LISTENER_SLOTS]{};
+
+    uintptr_t m_listeners_array{0};   // address of the TArray inside FUObjectArray
+    void* m_saved_listeners_data{nullptr};
+    int32_t m_saved_listeners_num{0};
+    int32_t m_saved_listeners_max{0};
+    bool m_create_listener_registered{false};
 
     void hook();
     void add_new_object(sdk::UObjectBase* object);
@@ -234,6 +347,25 @@ private:
     struct DebugInfo {
         uint64_t constructor_calls{0};
         uint64_t destructor_calls{0};
+        // How many objects were destroyed whose creation we never saw. Growing means
+        // not every creation path is covered.
+        // NOTE: zero here does NOT prove coverage is complete. The counter only
+        // reacts to the death of an unknown object; while such an object is alive it
+        // stays silent.
+        uint64_t untracked_destructions{0};
+
+        // How many objects were rejected because their class was not set yet (the
+        // early return in add_new_object). Such objects stay invisible to exists().
+        uint64_t null_class_rejects{0};
+
+        // How many objects the catch-up sweep had to add, i.e. how many were created
+        // behind the hook's back. Shows the real size of the hole. With the listener
+        // registered this should stay near zero, which is exactly how we verify that
+        // notification became complete.
+        uint64_t reconciled_objects{0};
+
+        // How many notifications arrived from the engine via FUObjectCreateListener.
+        uint64_t listener_notifications{0};
     } m_debug{};
 
     glm::vec3 m_last_left_grip_location{};
