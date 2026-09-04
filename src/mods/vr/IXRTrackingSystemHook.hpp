@@ -25,6 +25,11 @@ public:
     struct ProcessViewRotationData {
         std::chrono::high_resolution_clock::time_point last_update{std::chrono::high_resolution_clock::now()};
         glm::quat last_aim_rot{glm::identity<glm::quat>()};
+
+        // Where the game was looking when the view started following the aim, with the hand taken out.
+        // The view is then written as base * hand: an absolute direction, so it cannot drift.
+        glm::quat aim_view_base{glm::identity<glm::quat>()};
+        bool aim_view_base_valid{false};
         bool was_called{false};
     };
 

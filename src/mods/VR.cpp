@@ -2512,6 +2512,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
 
             m_aim_multiplayer_support->draw("Multiplayer Support");
 
+            m_view_follows_aim->draw("View Follows Aim");
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("When enabled, the aim turns the view instead of only the reticle, so the shot goes to the middle of the picture.");
+            }
+
             ImGui::TreePop();
         }
 
@@ -2551,6 +2557,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
     }
 
     if (selected_page == PAGE_CAMERA) {
+        m_zoom_factor->draw("Zoom Factor");
+
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Magnifies the view like a scope by narrowing the projection, where 1.0 is off.");
+        }
+
         ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
         if (ImGui::TreeNode("Camera Freeze")) {
             float camera_offset[] = {m_camera_forward_offset->value(), m_camera_right_offset->value(), m_camera_up_offset->value()};
@@ -3267,6 +3279,56 @@ void VR::set_rotation_offset(const glm::quat& offset) {
     std::unique_lock _{ m_rotation_mtx };
 
     m_rotation_offset = offset;
+}
+
+glm::quat VR::apply_zoom_to_head_rotation(const glm::quat& head_rotation) {
+    const auto zoom = get_zoom_factor();
+    const auto following_aim = is_view_following_aim();
+
+    // How much of a head turn still reaches the view.
+    //
+    // 1/zoom keeps the flow across the retina matching the inner ear. While the view follows the aim it
+    // is nothing: there the aim owns the direction, and any share left to the head moves the picture off
+    // the point the shot goes to. Roll is not part of this and passes through below.
+    const auto scale = following_aim ? 0.0f : 1.0f / zoom;
+
+    if (scale >= 1.0f) {
+        m_zoom_head_reference_valid = false;
+        m_zoom_view_rotation = head_rotation;
+        return head_rotation;
+    }
+
+    if (!m_zoom_head_reference_valid) {
+        m_zoom_head_reference_rotation = head_rotation;
+        m_zoom_head_reference_valid = true;
+    }
+
+    // Held whole here, roll included: the world and the UI are both submitted head locked, so the
+    // compositor already tilts them together. Feeding roll in as well would tilt the world twice and the
+    // UI once, and they would come apart on a tilt.
+    if (following_aim) {
+        m_zoom_view_rotation = m_zoom_head_reference_rotation;
+        return m_zoom_head_reference_rotation;
+    }
+
+    // Turn the view by angle/zoom so the eye and the inner ear agree again:
+    //
+    //     head turns A        ->  magnified world travels A * zoom across the retina
+    //     view turns A/zoom   ->  world travels A, which is what the inner ear reports
+    //
+    // Measured from where the head was when the zoom engaged, because the raw rotation is absolute and
+    // scaling it directly would depend on which way the player faced. Only gaze is scaled: the swing
+    // from the reference to now is where the head looks, and a fraction of it is the reduced turn. Roll
+    // stays in the head's own rotation and passes through -- tilting the head must tilt the picture.
+    const auto reference_forward = glm::normalize(m_zoom_head_reference_rotation * glm::vec3{0.0f, 0.0f, 1.0f});
+    const auto current_forward = glm::normalize(head_rotation * glm::vec3{0.0f, 0.0f, 1.0f});
+
+    const auto swing = glm::rotation(reference_forward, current_forward);
+    const auto wanted_swing = glm::slerp(glm::identity<glm::quat>(), swing, scale);
+
+    m_zoom_view_rotation = glm::normalize(wanted_swing * glm::inverse(swing) * head_rotation);
+
+    return m_zoom_view_rotation;
 }
 
 void VR::recenter_view() {

@@ -354,7 +354,9 @@ void OverlayComponent::update_slate_openvr() {
 
     //auto glm_matrix = glm::rowMajor4(Matrix4x4f{*(Matrix3x4f*)&pose.mDeviceToAbsoluteTracking});
     auto glm_matrix = Matrix4x4f{rotation_offset};
-    if (m_ui_follows_view->value()) {
+
+    // Head locked while the view follows the aim. Same reason as the OpenXR quads below.
+    if (m_ui_follows_view->value() || vr->is_view_following_aim()) {
         const auto mat = glm::rowMajor4(Matrix4x4f{*(Matrix3x4f*)&pose.mDeviceToAbsoluteTracking});
         glm_matrix = glm::extractMatrixRotation(mat);
         glm_matrix[3] += mat[3];
@@ -838,7 +840,13 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 
     auto glm_matrix = glm::identity<glm::mat4>();
 
-    if (vr->m_overlay_component.m_ui_follows_view->value()) {
+    // Head locked while the view follows the aim, whatever the setting says.
+    //
+    // The other branch anchors the quad in the stage through the rotation offset, which is taken once when
+    // the aim takes over. Head movement then leaves the quad facing where the head used to be while the
+    // picture stays with the aim, and the reticle the game draws into this UI slides off the middle of the
+    // screen -- off the point the shot goes to.
+    if (vr->m_overlay_component.m_ui_follows_view->value() || vr->is_view_following_aim()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());
@@ -865,6 +873,52 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     glm_matrix[3] += m_parent->m_slate_x_offset->value() * glm_matrix[0];
     glm_matrix[3] += m_parent->m_slate_y_offset->value() * glm_matrix[1];
     glm_matrix[3].w = 1.0f;
+
+    // Magnification multiplies every tangent the projection produces, so a world point off the middle of
+    // the picture moves outward. This layer is composited by the runtime, which the magnification never
+    // reaches, so it stays where it was put -- while the game draws its reticle in the middle of the layer,
+    // the aim being the axis of its own camera. The reticle then marks the angle the shot used to be at,
+    // and the gap grows with the angle between the head and the aim.
+    //
+    // Scaling where the layer sits by the same tangents closes it. Position, not size: what has to line up
+    // is the middle of the layer, and growing it would only inflate the rest of the HUD. Content the game
+    // draws away from its own middle still lands short, by the ratio between the layer and the game's field
+    // of view -- that needs the layer sized to the game, which is a separate matter.
+    //
+    // Only for the layer anchored in the stage. Head locked, its middle is already the middle of the
+    // picture; the offsets below are the player's placement, and scaling them would just drag the UI around.
+    const auto zoom = vr->get_zoom_factor();
+
+    if (zoom > 1.0f && layer.space == vr->m_openxr->stage_space) {
+        // Two frames are in play. The compositor will place this layer against the head, so the result has
+        // to be expressed there; the picture inside it was rendered for the view rotation, so that is what
+        // the offset is measured against. With the head still the two are the same rotation; once it turns,
+        // measuring against the head would scale an angle the projection never saw.
+        const auto head_pos = glm::vec3{vr->get_position(0)};
+        const auto head_rot = vr->get_rotation(0);
+        const auto view_rot = glm::mat4_cast(vr->get_zoom_view_rotation());
+
+        const auto to_layer = glm::vec3{glm_matrix[3]} - head_pos;
+
+        // A rotation's inverse is its transpose, so this is the offset seen from the view.
+        const auto in_view = glm::transpose(view_rot) * glm::vec4{to_layer, 0.0f};
+
+        // Forward is -Z, so anything in front has a negative Z. Behind the view there is nothing to
+        // correct and the tangents would blow up.
+        if (in_view.z < -0.01f) {
+            const auto tan_x = in_view.x / -in_view.z;
+            const auto tan_y = in_view.y / -in_view.z;
+
+            // The same tangents, magnified, read back in the head's frame.
+            const auto new_dir = glm::normalize(glm::vec3{head_rot * glm::vec4{tan_x * zoom, tan_y * zoom, -1.0f, 0.0f}});
+
+            // glm::rotation handles both the aligned and the opposite case, so no guard is needed.
+            const auto swing = glm::rotation(glm::normalize(to_layer), new_dir);
+
+            glm_matrix = glm::mat4_cast(swing) * glm_matrix;
+            glm_matrix[3] = glm::vec4{head_pos + (swing * to_layer), 1.0f};
+        }
+    }
 
     layer.pose.orientation = runtimes::OpenXR::to_openxr(glm::quat_cast(glm_matrix));
     layer.pose.position = runtimes::OpenXR::to_openxr(glm_matrix[3]);
@@ -945,7 +999,8 @@ std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> OverlayComp
     
     auto glm_matrix = glm::identity<glm::mat4>();
 
-    if (vr->m_overlay_component.m_ui_follows_view->value()) {
+    // Head locked while the view follows the aim. Same reason as the other quad above.
+    if (vr->m_overlay_component.m_ui_follows_view->value() || vr->is_view_following_aim()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());

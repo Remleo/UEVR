@@ -372,6 +372,36 @@ public:
         return m_camera_up_offset->value();
     }
 
+    // Magnification, 1.0 for none. Applied to the headset's projection: the game's own is discarded
+    // before it reaches the eye.
+    //
+    // Never below 1.0, and clamped here rather than trusted from the slider: ModValue::set does no
+    // clamping, so a script or a hand-edited config can hold any number. Below 1.0 the three places that
+    // read this would disagree -- the projection would widen while the head compensation, which has
+    // nothing to compensate for, would stay at 1.0.
+    float get_zoom_factor() const {
+        const auto zoom = m_zoom_factor->value();
+
+        return zoom > 1.0f ? zoom : 1.0f;
+    }
+
+    // Lets the aim reach the view instead of being cancelled out of it, so the aim turns the world and
+    // not just the reticle. The head stops steering the view while this is on.
+    bool is_view_following_aim() const {
+        return m_view_follows_aim->value();
+    }
+
+    // Shrinks head rotation by the zoom factor, so magnification does not make the world move faster
+    // than the head. For the view only -- see the implementation.
+    glm::quat apply_zoom_to_head_rotation(const glm::quat& head_rotation);
+
+    // The rotation the world was last rendered for: the head with its turn shrunk by the zoom. Anything
+    // that has to line up with the picture measures against this, not against the head -- a composited
+    // layer is placed against the head, but its contents belong here.
+    glm::quat get_zoom_view_rotation() const {
+        return m_zoom_view_rotation;
+    }
+
     auto get_world_scale() const {
         return m_world_scale->value();
     }
@@ -448,8 +478,16 @@ public:
         return m_enable_depth->value();
     }
 
+    // Off while the view follows the aim, whatever the toggle says. The two want opposite things:
+    //
+    //     decoupled pitch    game pitch stays out of the view, the head supplies it
+    //     view follows aim   the aim writes pitch INTO the game's rotation
+    //
+    // Both at once means the view never shows the pitch the shot uses, and the gap grows with how high
+    // the player aims. Answered here because a dozen call sites ask, across the aim path, the render,
+    // the UI overlay and the attachments.
     bool is_decoupled_pitch_enabled() const {
-        return m_decoupled_pitch->value();
+        return m_decoupled_pitch->value() && !is_view_following_aim();
     }
 
     bool is_decoupled_pitch_ui_adjust_enabled() const {
@@ -764,6 +802,15 @@ private:
     Vector4f m_standing_origin{ 0.0f, 1.5f, 0.0f, 0.0f };
     glm::quat m_rotation_offset{ glm::identity<glm::quat>() };
 
+    // Where the head was when the zoom engaged. Head movement is measured from here, so the result does
+    // not depend on which way the player faced at the time. Also the rotation a view following the aim
+    // is held at.
+    glm::quat m_zoom_head_reference_rotation{glm::identity<glm::quat>()};
+    bool m_zoom_head_reference_valid{false};
+
+    // What the world was last rendered for, kept for whoever has to agree with the picture.
+    glm::quat m_zoom_view_rotation{glm::identity<glm::quat>()};
+
     HANDLE m_present_finished_event{CreateEvent(nullptr, TRUE, FALSE, nullptr)};
 
     Vector4f m_raw_projections[2]{};
@@ -967,6 +1014,8 @@ private:
     const ModSlider::Ptr m_camera_right_offset{ ModSlider::create(generate_name("CameraRightOffset"), -4000.0f, 4000.0f, 0.0f) };
     const ModSlider::Ptr m_camera_up_offset{ ModSlider::create(generate_name("CameraUpOffset"), -4000.0f, 4000.0f, 0.0f) };
     const ModSlider::Ptr m_camera_fov_distance_multiplier{ ModSlider::create(generate_name("CameraFOVDistanceMultiplier"), 0.00f, 1000.0f, 0.0f) };
+    const ModSlider::Ptr m_zoom_factor{ ModSlider::create(generate_name("ZoomFactor"), 1.0f, 8.0f, 1.0f) };
+    const ModToggle::Ptr m_view_follows_aim{ ModToggle::create(generate_name("ViewFollowsAim"), false) };
     const ModSlider::Ptr m_world_scale{ ModSlider::create(generate_name("WorldScale"), 0.01f, 10.0f, 1.0f) };
     const ModSlider::Ptr m_depth_scale{ ModSlider::create(generate_name("DepthScale"), 0.01f, 1.0f, 1.0f) };
 
@@ -1084,6 +1133,8 @@ public:
             *m_camera_forward_offset,
             *m_camera_right_offset,
             *m_camera_up_offset,
+            *m_zoom_factor,
+            *m_view_follows_aim,
             *m_world_scale,
             *m_depth_scale,
             *m_custom_z_near,
