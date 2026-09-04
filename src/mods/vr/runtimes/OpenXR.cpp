@@ -1747,6 +1747,26 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
         spdlog::warn("[VR] No stage views to submit");
     }
 
+    // While the view follows the aim, the world is submitted head locked in the view space, the way the UI
+    // quad already is.
+    //
+    //     stage space   the layer carries a room pose, and the compositor turns the image by the difference
+    //                   between it and the pose measured at each refresh -- correct whenever the image was
+    //                   rendered for a head pose
+    //     view space    no correction: the image belongs to the head
+    //
+    // A view following the aim is not rendered for a head pose at all, so there is nothing to correct and the
+    // difference only puts the pose's staleness into the picture as movement. Frames arrive at about half the
+    // refresh rate, so each is shown two or three times with a different correction, and the head's own shake
+    // lands in the picture in time with the pulse. In the view space the compositor leaves the world alone,
+    // exactly as it leaves the UI quad alone, and the two stop drifting apart -- which is how the fault showed
+    // itself in the first place.
+    //
+    // The poses come from the view space locate, not the pipelined stage one: there a pose is the eye's offset
+    // from the head, fixed hardware geometry that cannot go stale.
+    const auto head_locked_world = VR::get()->is_view_following_aim()
+                                   && this->views.size() >= pipelined_stage_views.size();
+
     // Reset size of end frame data containers to 0.
     this->end_frame_data.clear();
 
@@ -1807,7 +1827,8 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             }
 
             projection_layer_views[i].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
-            projection_layer_views[i].pose = pipelined_stage_views[i].pose;
+            // The field of view is the same in either space: it belongs to the projection, not to the pose.
+            projection_layer_views[i].pose = head_locked_world ? this->views[i].pose : pipelined_stage_views[i].pose;
             projection_layer_views[i].fov = pipelined_stage_views[i].fov;
             projection_layer_views[i].subImage.swapchain = swapchain->handle;
 
@@ -1866,7 +1887,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
 
         auto& layer = projection_layer_cache.emplace_back();
         layer.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
-        layer.space = this->stage_space;
+        layer.space = head_locked_world ? this->view_space : this->stage_space;
         layer.viewCount = (uint32_t)projection_layer_views.size();
         layer.views = projection_layer_views.data();
         layer.layerFlags = 0;

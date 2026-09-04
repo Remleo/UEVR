@@ -5043,14 +5043,32 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         const auto is_2d_screen = vr->is_using_2d_screen();
 
         const auto rotation_offset = vr->get_rotation_offset();
-        const auto current_hmd_rotation = glm::normalize(rotation_offset * glm::quat{vr->get_rotation(0)});
+
+        // Only the view is scaled -- not the aim methods, not the attachments.
+        //
+        // The aim path writes a control rotation from the same head rotation, so scaling it there too
+        // would count the reduction twice: the game camera turns by the shrunk angle and the view
+        // shrinks it again. Attachments are left alone for the reverse reason -- hands belong where the
+        // hands are. So zoom fits game or controller aiming; with head aiming the camera follows the
+        // head at full speed while the view takes a fraction, and the two fight.
+        const auto scaled_head_rotation = vr->apply_zoom_to_head_rotation(glm::quat{vr->get_rotation(0)});
+        const auto current_hmd_rotation = glm::normalize(rotation_offset * scaled_head_rotation);
         const auto current_eye_rotation_offset = glm::normalize(glm::quat{vr->get_eye_transform(true_index)});
 
         const auto new_rotation = glm::normalize(vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
         const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
 
+        // While the view follows the aim, the eye sits on the game's own camera.
+        //
+        // The game animates the weapon up to that camera, so it is the eye point the sights are built
+        // for, and the sight picture only holds while eye and weapon keep one relative position. A nod
+        // has nothing to answer it anyway -- the pawn cannot rise. Sideways, roomscale does answer, but
+        // by walking the pawn with a sweep that geometry can block while the recenter below credits the
+        // movement regardless. The roomscale block further down is skipped in this state.
+        const auto standing_delta = vr->is_view_following_aim()
+                                    ? Vector4f{0.0f, 0.0f, 0.0f, 0.0f}
+                                    : vr->get_position(0) - vr->get_standing_origin();
 
-        const auto standing_delta = vr->get_position(0) - vr->get_standing_origin();
         const auto standing_delta_flat = glm::vec3{standing_delta.x, 0, standing_delta.z};
 
         const auto pos = glm::vec3{rotation_offset * standing_delta};
@@ -5123,7 +5141,9 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                     }
                 }
 
-                if (pawn != nullptr && vr->is_roomscale_enabled()) {
+                // Not while the view follows the aim: the head delta is held above, so this would walk
+                // the pawn by the same constant every frame.
+                if (pawn != nullptr && vr->is_roomscale_enabled() && !vr->is_view_following_aim()) {
                     const auto pawn_pos = pawn->get_actor_location();
                     const auto new_pos = pawn_pos - head_offset_flat;
 
@@ -5306,6 +5326,28 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
         } else {
             const auto fmat = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
             double_matrix = fmat;
+        }
+
+        // Magnification, applied to the headset's projection -- the game's matrix was replaced above,
+        // so narrowing on the game's side cannot reach the eye.
+        //
+        // Same operation either way. The projection is built from the tangents of the half angles:
+        //
+        //     m[0][0] = 2/(r-l)    m[2][0] = -(r+l)/(r-l)
+        //
+        // so dividing every tangent by z multiplies m[0][0] and m[1][1] by z and leaves the offsets
+        // alone. Leaving them alone is the point: it keeps the off-centre frustum the runtime asked for,
+        // so the view centre stays put and the eyes stay consistent.
+        const auto zoom = vr->get_zoom_factor();
+
+        if (zoom > 1.0f) {
+            if (!g_hook->m_has_double_precision) {
+                (*out)[0][0] *= zoom;
+                (*out)[1][1] *= zoom;
+            } else {
+                double_matrix[0][0] *= (double)zoom;
+                double_matrix[1][1] *= (double)zoom;
+            }
         }
     } else {
         SPDLOG_ERROR("CalculateStereoProjectionMatrix returned nullptr!");

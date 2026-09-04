@@ -1942,6 +1942,8 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
         const auto adjusted_forward = glm::normalize(right_controller_end - glm::vec3{vr->get_standing_origin()});
         const auto target_forward = utility::math::to_quat(adjusted_forward);
 
+        const auto following_aim = vr->is_view_following_aim();
+
         glm::quat right_controller_forward_rot{};
 
         if (vr->is_aim_interpolation_enabled()) {
@@ -1958,11 +1960,43 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
             right_controller_forward_rot = target_forward;
         }
 
-        const auto wanted_rotation = glm::normalize(rotation_offset * right_controller_forward_rot);
-        const auto new_rotation = glm::normalize(vqi_norm * wanted_rotation);
-        euler = glm::degrees(utility::math::euler_angles_from_steamvr(new_rotation));
+        if (following_aim) {
+            // The normal path below gives the aim to the game and then takes the same rotation back out
+            // of the render, so the game aims where the hand points while the picture stays put. A scope
+            // wants the other half: the camera itself looks along the hand.
+            //
+            // Written absolutely, as base * hand. A per-frame delta comes back through vqi_norm on the
+            // next frame and the view accelerates away.
+            if (!m_process_view_rotation_data.aim_view_base_valid) {
+                // Taken out whole, not just the yaw, so both axes are measured from this moment:
+                // engaging changes nothing, and moving the hand moves the view by the same angle.
+                m_process_view_rotation_data.aim_view_base =
+                    glm::normalize(vqi_norm * glm::inverse(right_controller_forward_rot));
+                m_process_view_rotation_data.aim_view_base_valid = true;
 
-        vr->set_rotation_offset(glm::inverse(utility::math::flatten(right_controller_forward_rot)));
+                // The render subtracts the rotation offset from the view, so it has to hold the head
+                // here, not the hand -- the hand is what the view follows. The horizon variant inverts
+                // the head whole; recenter_view flattens it first and leaves the head's pitch and roll
+                // in the render as a fixed angle the game knows nothing about, which is exactly how far
+                // a game-drawn reticle would sit from the shot.
+                //
+                // Once, on engage: recentering every frame would keep subtracting a head turn the render
+                // no longer adds, and the world would move against the head.
+                vr->recenter_horizon();
+            }
+
+            const auto new_rotation =
+                glm::normalize(m_process_view_rotation_data.aim_view_base * right_controller_forward_rot);
+            euler = glm::degrees(utility::math::euler_angles_from_steamvr(new_rotation));
+        } else {
+            m_process_view_rotation_data.aim_view_base_valid = false;
+
+            const auto wanted_rotation = glm::normalize(rotation_offset * right_controller_forward_rot);
+            const auto new_rotation = glm::normalize(vqi_norm * wanted_rotation);
+            euler = glm::degrees(utility::math::euler_angles_from_steamvr(new_rotation));
+
+            vr->set_rotation_offset(glm::inverse(utility::math::flatten(right_controller_forward_rot)));
+        }
 
         m_process_view_rotation_data.last_aim_rot = right_controller_forward_rot;
 
