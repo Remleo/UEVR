@@ -103,6 +103,14 @@ private:
 
     const ModToggle::Ptr m_log_to_disk{ ModToggle::create(generate_name("LogToDisk"), false) };
 
+    // Resetting the scripts is the main loop when working on one, and the only way to do it was the
+    // button in this panel -- which means taking the headset off or fighting the menu in VR.
+    //
+    // Numpad plus, and not numpad 0, because the keypad digits only send VK_NUMPAD* while Num Lock is on.
+    // With it off the same key sends VK_INSERT, which is what toggles this menu (Framework.cpp), so the
+    // binding would have opened the menu instead. VK_ADD is the same code either way.
+    const ModKey::Ptr m_keybind_reset_scripts{ ModKey::create(generate_name("ResetScriptsKey"), VK_ADD) };
+
     const ModCombo::Ptr m_gc_handler { 
         ModCombo::create(generate_name("GarbageCollectionHandler"),
         {
@@ -142,6 +150,7 @@ private:
 
     ValueList m_options{
         *m_log_to_disk,
+        *m_keybind_reset_scripts,
         *m_gc_handler,
         *m_gc_type,
         *m_gc_mode,
