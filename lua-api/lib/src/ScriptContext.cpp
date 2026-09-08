@@ -560,7 +560,21 @@ int ScriptContext::setup_bindings() {
             return std::string{out};
         },
         "save_config", &UEVR_VRData::save_config,
-        "reload_config", &UEVR_VRData::reload_config
+        "reload_config", &UEVR_VRData::reload_config,
+
+        // The source for the secondary UI layer. Takes a texture object -- normally the RenderTarget a
+        // UWidgetComponent draws into -- or nil to take the layer away.
+        //
+        // Everything else about that layer is a UI_Secondary_* config value, so a script sets it through
+        // set_mod_value like any other. Only the pointer needs a call of its own.
+        "set_secondary_ui_source", [](UEVR_VRData& self, sol::object obj) {
+            if (!obj.is<uevr::API::UObject*>()) {
+                self.set_secondary_ui_source(nullptr);
+                return;
+            }
+
+            self.set_secondary_ui_source((UEVR_UObjectHandle)obj.as<uevr::API::UObject*>());
+        }
     );
 
     // TODO: Add operators to these types

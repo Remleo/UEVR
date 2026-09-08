@@ -23,6 +23,12 @@
 #undef max
 #include <tracy/Tracy.hpp>
 
+// Forward declared rather than included: only a pointer is held here, and pulling the texture headers
+// into VR.hpp would spread them through everything that includes it.
+namespace sdk {
+class UTexture;
+}
+
 class VR : public Mod {
 public:
     enum RenderingMethod {
@@ -606,6 +612,64 @@ public:
     bool is_game_frame_stalled() const {
         return (std::chrono::steady_clock::now() - m_last_game_frame_advance) >= std::chrono::milliseconds(250);
     }
+
+    // The source for a script-fed UI plane: a render target a script hands us, usually the one a
+    // UWidgetComponent draws its widget into.
+    //
+    // Held as sdk::UTexture because that is the level the SDK can walk down from: get_texture_rhi() and
+    // then get_native_resource(). The offset that walk needs is resolved lazily on the render thread, the
+    // same way the scene capture resolves it, so handing a texture over from a script never touches
+    // rendering state directly.
+    //
+    // Null is the normal state. With no source, that plane is never built and never submitted, and nothing
+    // about the existing behaviour changes.
+    //
+    // INDEXED BY PLANE, like every other value a plane is placed by. Index 0 is the interface the game draws
+    // and the engine path fills it, so its slot stays null forever -- and that null is what tells the
+    // placement code to use the whole swapchain for it. One rule, read by index, instead of the second plane
+    // being a special case everywhere.
+    void set_secondary_ui_source(sdk::UTexture* tex);
+
+    sdk::UTexture* get_ui_source(size_t plane) const {
+        return plane < m_ui_source.size() ? m_ui_source[plane] : nullptr;
+    }
+
+    bool is_ui_source_ready(size_t plane) const {
+        return plane < m_ui_source.size() && m_ui_source[plane] != nullptr && m_ui_source_offset_ready[plane];
+    }
+
+    // IS IT STILL THERE. A script hands us a UObject and the level takes it away without telling anyone -- loading
+    // a save crashed the game inside this DLL, on the frame after the render target lost its resource, because we
+    // kept reading through a pointer to a destroyed object.
+    //
+    // Answered WITHOUT TOUCHING THE OBJECT. The index and serial number are taken when the source is accepted, and
+    // the check is a lookup in the engine's object table: the slot must still hold this pointer and still carry the
+    // same serial. Reading a flag off the object itself would mean reading freed memory to find out whether it is
+    // freed.
+    bool is_ui_source_alive(size_t plane) const;
+
+    // Let the source go, from the render path, when the check above says it is gone. A script may hand over a new
+    // one immediately afterwards, which is what happens after a level loads.
+    void drop_ui_source(size_t plane);
+
+    // The source's own pixel size, published by whoever copies it so its plane can crop to it.
+    //
+    // Swapchains are created once at session start, before any script exists, so a script-fed plane gets one
+    // as large as the game's. Its source is almost always smaller, and submitting the whole swapchain would
+    // show that difference as empty space around the picture -- which reads as "the layer is tiny".
+    //
+    // Zero means "nothing copied yet", which is also the permanent answer for the game's own plane.
+    void set_ui_source_size(size_t plane, uint32_t w, uint32_t h) {
+        if (plane < m_ui_source_size.size()) {
+            m_ui_source_size[plane] = {w, h};
+        }
+    }
+
+    std::array<uint32_t, 2> get_ui_source_size(size_t plane) const {
+        return plane < m_ui_source_size.size() ? m_ui_source_size[plane] : std::array<uint32_t, 2>{0, 0};
+    }
+
+
 
     bool is_ahud_compatibility_enabled() const {
         return m_compatibility_ahud->value();
@@ -1209,6 +1273,17 @@ private:
     // Written where the view family begins, read while presenting. Unsynchronized on purpose, like the
     // timestamps above it: a torn read costs one frame sourcing the wrong eye texture.
     std::chrono::steady_clock::time_point m_last_game_frame_advance{std::chrono::steady_clock::now()};
+
+    // Script-fed UI plane sources, by plane index. See set_secondary_ui_source. Sized by the overlay's own
+    // count rather than a second constant here: two numbers for one thing is one number too many.
+    std::array<sdk::UTexture*, vrmod::OverlayComponent::PLANE_COUNT> m_ui_source{};
+    std::array<bool, vrmod::OverlayComponent::PLANE_COUNT> m_ui_source_offset_ready{};
+    std::array<std::array<uint32_t, 2>, vrmod::OverlayComponent::PLANE_COUNT> m_ui_source_size{};
+
+    // Where the source sits in the engine's object table, and which incarnation of that slot it was. Kept so the
+    // "is it still there" check never has to touch the object -- see is_ui_source_alive.
+    std::array<int32_t, vrmod::OverlayComponent::PLANE_COUNT> m_ui_source_index{};
+    std::array<int32_t, vrmod::OverlayComponent::PLANE_COUNT> m_ui_source_serial{};
 
     struct {
         bool draw{false};

@@ -212,17 +212,17 @@ void OverlayComponent::on_draw_ui() {
             }
         }
 
-        float ui_offset[] { m_slate_x_offset->value(), m_slate_y_offset->value(), m_slate_distance->value() };
+        float ui_offset[] { m_slate_x_offset[PLANE_GAME]->value(), m_slate_y_offset[PLANE_GAME]->value(), m_slate_distance[PLANE_GAME]->value() };
 
         if (ImGui::SliderFloat3("UI Offset", ui_offset, -10.0f, 10.0f)) {
-            m_slate_x_offset->value() = ui_offset[0];
-            m_slate_y_offset->value() = ui_offset[1];
-            m_slate_distance->value() = ui_offset[2];
+            m_slate_x_offset[PLANE_GAME]->value() = ui_offset[0];
+            m_slate_y_offset[PLANE_GAME]->value() = ui_offset[1];
+            m_slate_distance[PLANE_GAME]->value() = ui_offset[2];
         }
 
-        m_slate_distance->draw("UI Distance");
-        m_slate_size->draw("UI Size");
-        m_ui_follows_view->draw("UI Follows View");
+        m_slate_distance[PLANE_GAME]->draw("UI Distance");
+        m_slate_size[PLANE_GAME]->draw("UI Size");
+        m_ui_follows_view[PLANE_GAME]->draw("UI Follows View");
         ImGui::SameLine();
         m_ui_invert_alpha->draw("UI Invert Alpha");
 
@@ -356,7 +356,7 @@ void OverlayComponent::update_slate_openvr() {
     auto glm_matrix = Matrix4x4f{rotation_offset};
 
     // Head locked while the view follows the aim. Same reason as the OpenXR quads below.
-    if (m_ui_follows_view->value() || vr->is_view_following_aim()) {
+    if (m_ui_follows_view[PLANE_GAME]->value() || vr->is_view_following_aim()) {
         const auto mat = glm::rowMajor4(Matrix4x4f{*(Matrix3x4f*)&pose.mDeviceToAbsoluteTracking});
         glm_matrix = glm::extractMatrixRotation(mat);
         glm_matrix[3] += mat[3];
@@ -364,9 +364,9 @@ void OverlayComponent::update_slate_openvr() {
         glm_matrix[3] += vr->get_standing_origin();
     }
 
-    glm_matrix[3] -= glm_matrix[2] * m_slate_distance->value();
-    glm_matrix[3] += m_slate_x_offset->value() * glm_matrix[0];
-    glm_matrix[3] += m_slate_y_offset->value() * glm_matrix[1];
+    glm_matrix[3] -= glm_matrix[2] * m_slate_distance[PLANE_GAME]->value();
+    glm_matrix[3] += m_slate_x_offset[PLANE_GAME]->value() * glm_matrix[0];
+    glm_matrix[3] += m_slate_y_offset[PLANE_GAME]->value() * glm_matrix[1];
     glm_matrix[3].w = 1.0f;
     
     const auto steamvr_matrix = Matrix3x4f{glm::rowMajor4(glm_matrix)};
@@ -375,7 +375,7 @@ void OverlayComponent::update_slate_openvr() {
     const auto is_d3d12 = g_framework->get_renderer_type() == Framework::RendererType::D3D12;
     const auto size = is_d3d12 ? g_framework->get_d3d12_rt_size() : g_framework->get_d3d11_rt_size();
     const auto aspect = size.x / size.y;
-    const auto width_meters = m_slate_size->value() * aspect;
+    const auto width_meters = m_slate_size[PLANE_GAME]->value() * aspect;
     vr::VROverlay()->SetOverlayWidthInMeters(m_slate_overlay_handle, width_meters);
 
     if (is_d3d11) {
@@ -712,10 +712,10 @@ void OverlayComponent::update_overlay_openvr() {
         if (g_framework->is_drawing_ui()) {
             glm_matrix[3] -= glm_matrix[2] * m_framework_distance->value();
         } else {
-            glm_matrix[3] -= glm_matrix[2] * (m_slate_distance->value() - 0.01f);
+            glm_matrix[3] -= glm_matrix[2] * (m_slate_distance[PLANE_GAME]->value() - 0.01f);
 
-            glm_matrix[3] += m_slate_x_offset->value() * glm_matrix[0];
-            glm_matrix[3] += m_slate_y_offset->value() * glm_matrix[1];
+            glm_matrix[3] += m_slate_x_offset[PLANE_GAME]->value() * glm_matrix[0];
+            glm_matrix[3] += m_slate_y_offset[PLANE_GAME]->value() * glm_matrix[1];
         }
 
         glm_matrix[3].w = 1.0f;
@@ -725,7 +725,7 @@ void OverlayComponent::update_overlay_openvr() {
         const auto is_d3d12 = g_framework->get_renderer_type() == Framework::RendererType::D3D12;
         const auto size = is_d3d12 ? g_framework->get_d3d12_rt_size() : g_framework->get_d3d11_rt_size();
         const auto aspect = size.x / size.y;
-        const auto size_meters = g_framework->is_drawing_ui() ? m_framework_size->value() : m_slate_size->value();
+        const auto size_meters = g_framework->is_drawing_ui() ? m_framework_size->value() : m_slate_size[PLANE_GAME]->value();
 
         const float scale_factor = g_framework->is_drawing_ui() ? (size.x / 1920.0f) : 1.0f;
         const float adjusted_size_meters = size_meters * scale_factor;
@@ -811,7 +811,8 @@ void OverlayComponent::update_overlay_openvr() {
 
 std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::OpenXR::generate_slate_quad(
     runtimes::OpenXR::SwapchainIndex swapchain, 
-    XrEyeVisibility eye) 
+    XrEyeVisibility eye,
+    size_t plane) 
 {
     auto& vr = VR::get();
 
@@ -826,7 +827,7 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 
     const auto is_left_eye = eye == XR_EYE_VISIBILITY_BOTH || eye == XR_EYE_VISIBILITY_LEFT;
 
-    auto& layer = is_left_eye ? this->m_slate_layer : this->m_slate_layer_right;
+    auto& layer = is_left_eye ? this->m_slate_layer[plane] : this->m_slate_layer_right[plane];
 
     layer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
     const auto& ui_swapchain = vr->m_openxr->swapchains[(uint32_t)swapchain];
@@ -834,9 +835,21 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     layer.subImage.imageRect.offset.x = 0;
     layer.subImage.imageRect.offset.y = 0;
-    layer.subImage.imageRect.extent.width = ui_swapchain.width;
-    layer.subImage.imageRect.extent.height = ui_swapchain.height;
     layer.eyeVisibility = eye;
+
+    // CROPPED TO WHAT WAS ACTUALLY DRAWN. A plane fed by a script gets a swapchain as large as the game's,
+    // because swapchains are made at session start when no script exists to say how big the picture will be.
+    // The source is copied to the origin and is usually far smaller, so submitting the whole swapchain would
+    // ring the picture with everything else in that texture -- which is what "the reticle is tiny" looked
+    // like. The game's own plane fills its swapchain, so its rect is the whole thing.
+    const auto source_size = vr->get_ui_source_size(plane);
+    const auto has_source_size = source_size[0] != 0 && source_size[1] != 0;
+
+    const auto rect_w = has_source_size ? std::min<uint32_t>(source_size[0], ui_swapchain.width) : ui_swapchain.width;
+    const auto rect_h = has_source_size ? std::min<uint32_t>(source_size[1], ui_swapchain.height) : ui_swapchain.height;
+
+    layer.subImage.imageRect.extent.width = (int32_t)rect_w;
+    layer.subImage.imageRect.extent.height = (int32_t)rect_h;
 
     auto glm_matrix = glm::identity<glm::mat4>();
 
@@ -846,7 +859,7 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     // the aim takes over. Head movement then leaves the quad facing where the head used to be while the
     // picture stays with the aim, and the reticle the game draws into this UI slides off the middle of the
     // screen -- off the point the shot goes to.
-    if (vr->m_overlay_component.m_ui_follows_view->value() || vr->is_view_following_aim()) {
+    if (vr->m_overlay_component.m_ui_follows_view[plane]->value() || vr->is_view_following_aim()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());
@@ -864,14 +877,15 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
         layer.space = vr->m_openxr->stage_space;
     }
 
-    const auto size_meters = m_parent->m_slate_size->value();
-    const auto meters_w = (float)ui_swapchain.width / (float)ui_swapchain.height * size_meters;
+    // Height in meters, width from the cropped aspect -- so a plane showing a square source stays square.
+    const auto size_meters = m_parent->m_slate_size[plane]->value();
+    const auto meters_w = (float)rect_w / (float)rect_h * size_meters;
     const auto meters_h = size_meters;
     layer.size = {meters_w, meters_h};
 
-    glm_matrix[3] -= glm_matrix[2] * m_parent->m_slate_distance->value();
-    glm_matrix[3] += m_parent->m_slate_x_offset->value() * glm_matrix[0];
-    glm_matrix[3] += m_parent->m_slate_y_offset->value() * glm_matrix[1];
+    glm_matrix[3] -= glm_matrix[2] * m_parent->m_slate_distance[plane]->value();
+    glm_matrix[3] += m_parent->m_slate_x_offset[plane]->value() * glm_matrix[0];
+    glm_matrix[3] += m_parent->m_slate_y_offset[plane]->value() * glm_matrix[1];
     glm_matrix[3].w = 1.0f;
 
     // Magnification multiplies every tangent the projection produces, so a world point off the middle of
@@ -922,6 +936,12 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 
     layer.pose.orientation = runtimes::OpenXR::to_openxr(glm::quat_cast(glm_matrix));
     layer.pose.position = runtimes::OpenXR::to_openxr(glm_matrix[3]);
+
+    // The mouse belongs to the game's plane. A script-fed plane has no cursor to move and no menu to click,
+    // and letting it write the shared intersection state would put two planes on one pointer.
+    if (plane != PLANE_GAME) {
+        return layer;
+    }
 
     // Check if the controller pointer intersects with the quad, and we can use this to emulate the mouse
     if (vr->is_using_controllers()) {
@@ -1000,7 +1020,7 @@ std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> OverlayComp
     auto glm_matrix = glm::identity<glm::mat4>();
 
     // Head locked while the view follows the aim. Same reason as the other quad above.
-    if (vr->m_overlay_component.m_ui_follows_view->value() || vr->is_view_following_aim()) {
+    if (vr->m_overlay_component.m_ui_follows_view[PLANE_GAME]->value() || vr->is_view_following_aim()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());
@@ -1018,7 +1038,7 @@ std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> OverlayComp
         layer.space = vr->m_openxr->stage_space;
     }
 
-    const auto size_meters = m_parent->m_slate_size->value();
+    const auto size_meters = m_parent->m_slate_size[PLANE_GAME]->value();
     const auto meters_w = (float)ui_swapchain.width / (float)ui_swapchain.height * size_meters;
     const auto meters_h = size_meters;
 
@@ -1030,10 +1050,10 @@ std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> OverlayComp
     layer.aspectRatio = (meters_w / meters_h);
     layer.radius = (meters_h / layer.centralAngle) * layer.aspectRatio;
 
-    glm_matrix[3] -= glm_matrix[2] * m_parent->m_slate_distance->value();
+    glm_matrix[3] -= glm_matrix[2] * m_parent->m_slate_distance[PLANE_GAME]->value();
     glm_matrix[3] += glm_matrix[2] * layer.radius;
-    glm_matrix[3] += m_parent->m_slate_x_offset->value() * glm_matrix[0];
-    glm_matrix[3] += m_parent->m_slate_y_offset->value() * glm_matrix[1];
+    glm_matrix[3] += m_parent->m_slate_x_offset[PLANE_GAME]->value() * glm_matrix[0];
+    glm_matrix[3] += m_parent->m_slate_y_offset[PLANE_GAME]->value() * glm_matrix[1];
     glm_matrix[3].w = 1.0f;
 
     layer.pose.orientation = runtimes::OpenXR::to_openxr(glm::quat_cast(glm_matrix));
@@ -1044,19 +1064,30 @@ std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> OverlayComp
 
 std::optional<std::reference_wrapper<XrCompositionLayerBaseHeader>> OverlayComponent::OpenXR::generate_slate_layer(
     runtimes::OpenXR::SwapchainIndex swapchain, 
-    XrEyeVisibility eye)
+    XrEyeVisibility eye,
+    size_t plane)
 {
+    // The cylinder belongs to the game's plane: its angle is that plane's setting, and a curved sheet for a
+    // reticle-sized picture would only bend it. A script-fed plane is always a quad.
+    if (plane != OverlayComponent::PLANE_GAME) {
+        if (auto result = generate_slate_quad(swapchain, eye, plane); result.has_value()) {
+            return *(XrCompositionLayerBaseHeader*)&result.value().get();
+        }
+
+        return std::nullopt;
+    }
+
     switch ((OverlayComponent::OverlayType)m_parent->m_slate_overlay_type->value()) {
     default:
     case OverlayComponent::OverlayType::QUAD:
-        if (auto result = generate_slate_quad(swapchain, eye); result.has_value()) {
+        if (auto result = generate_slate_quad(swapchain, eye, plane); result.has_value()) {
             return *(XrCompositionLayerBaseHeader*)&result.value().get();
         }
 
         return std::nullopt;
     case OverlayComponent::OverlayType::CYLINDER:
         if (!VR::get()->get_runtime()->is_cylinder_layer_allowed()) {
-            if (auto result = generate_slate_quad(swapchain, eye); result.has_value()) {
+            if (auto result = generate_slate_quad(swapchain, eye, plane); result.has_value()) {
                 return *(XrCompositionLayerBaseHeader*)&result.value().get();
             }
 
@@ -1114,7 +1145,7 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
         layer.space = vr->m_openxr->stage_space;
     }
 
-    const auto size_meters = g_framework->is_drawing_ui() ? m_parent->m_framework_size->value() : m_parent->m_slate_size->value();
+    const auto size_meters = g_framework->is_drawing_ui() ? m_parent->m_framework_size->value() : m_parent->m_slate_size[PLANE_GAME]->value();
     const float scale_factor =  g_framework->is_drawing_ui() ? ((float)ui_swapchain.width / 1920.0f) : 1.0f;
 
     // Adjust size_meters based on scaling factor.
@@ -1129,10 +1160,10 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     if (g_framework->is_drawing_ui()) {
         glm_matrix[3] -= glm_matrix[2] * m_parent->m_framework_distance->value();
     } else {
-        glm_matrix[3] -= glm_matrix[2] * (m_parent->m_slate_distance->value() - 0.01f);
+        glm_matrix[3] -= glm_matrix[2] * (m_parent->m_slate_distance[PLANE_GAME]->value() - 0.01f);
 
-        glm_matrix[3] += m_parent->m_slate_x_offset->value() * glm_matrix[0];
-        glm_matrix[3] += m_parent->m_slate_y_offset->value() * glm_matrix[1];
+        glm_matrix[3] += m_parent->m_slate_x_offset[PLANE_GAME]->value() * glm_matrix[0];
+        glm_matrix[3] += m_parent->m_slate_y_offset[PLANE_GAME]->value() * glm_matrix[1];
     }
 
     glm_matrix[3].w = 1.0f;

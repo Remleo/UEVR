@@ -14,6 +14,14 @@ class D3D12Component;
 
 class OverlayComponent : public ModComponent {
 public:
+    // TWO UI PLANES, READ BY INDEX. 0 is the interface the game draws, 1 is a plane a script feeds.
+    //
+    // Public because the count is not this class's private business: VR sizes its source arrays by it and
+    // the D3D12 path loops over it. One place to change, and nothing to keep in step by hand.
+    static constexpr size_t PLANE_COUNT = 2;
+    static constexpr size_t PLANE_GAME = 0;
+    static constexpr size_t PLANE_SCRIPT = 1;
+
     void on_reset();
     std::optional<std::string> on_initialize_openvr();
 
@@ -100,13 +108,47 @@ private:
     };
 
     const ModCombo::Ptr m_slate_overlay_type{ ModCombo::create("UI_OverlayType", s_overlay_type_names) };
-    const ModSlider::Ptr m_slate_distance{ ModSlider::create("UI_Distance", 0.5f, 10.0f, 2.0f) };
-    const ModSlider::Ptr m_slate_x_offset{ ModSlider::create("UI_X_Offset", -10.0f, 10.0f, 0.0f) };
-    const ModSlider::Ptr m_slate_y_offset{ ModSlider::create("UI_Y_Offset", -10.0f, 10.0f, 0.0f) };
-    const ModSlider::Ptr m_slate_size{ ModSlider::create("UI_Size", 0.5f, 10.0f, 2.0f) };
     const ModSlider::Ptr m_slate_cylinder_angle{ ModSlider::create("UI_Cylinder_Angle", 0.0f, 360.0f, 90.0f) };
-    const ModToggle::Ptr m_ui_follows_view{ ModToggle::create("UI_FollowView", false) };
     const ModToggle::Ptr m_ui_invert_alpha{ ModToggle::create("UI_InvertAlpha", false) };
+
+    // PLACEMENT VALUES, ONE ARRAY PER SETTING. Index 1 is a plane a script feeds, so a piece of the interface
+    // can be placed differently from the rest -- a reticle that belongs with the shot rather than with the
+    // head, which is what this was built for.
+    //
+    // Everything the placement reads is an array of two, because the placement itself is one piece of code
+    // walked twice. The alternative -- a second copy of it with its own anchoring -- was written first and
+    // thrown away: it repeated the pose maths and got a different answer than the plane beside it, which is
+    // the one thing that must not differ.
+    //
+    // The keys keep their old names at index 0. Configs and profiles in the wild already carry them, and a
+    // rename would silently reset everyone's interface placement.
+    const std::array<ModSlider::Ptr, PLANE_COUNT> m_slate_distance{
+        ModSlider::create("UI_Distance", 0.5f, 10.0f, 2.0f),
+        ModSlider::create("UI_Secondary_Distance", 0.05f, 10.0f, 1.0f),
+    };
+
+    const std::array<ModSlider::Ptr, PLANE_COUNT> m_slate_size{
+        ModSlider::create("UI_Size", 0.5f, 10.0f, 2.0f),
+        ModSlider::create("UI_Secondary_Size", 0.01f, 10.0f, 0.25f),
+    };
+
+    const std::array<ModSlider::Ptr, PLANE_COUNT> m_slate_x_offset{
+        ModSlider::create("UI_X_Offset", -10.0f, 10.0f, 0.0f),
+        ModSlider::create("UI_Secondary_X_Offset", -10.0f, 10.0f, 0.0f),
+    };
+
+    const std::array<ModSlider::Ptr, PLANE_COUNT> m_slate_y_offset{
+        ModSlider::create("UI_Y_Offset", -10.0f, 10.0f, 0.0f),
+        ModSlider::create("UI_Secondary_Y_Offset", -10.0f, 10.0f, 0.0f),
+    };
+
+    // The binding, and the only value that has to differ between the two for the reticle to work: off means
+    // the plane hangs in the stage through the rotation offset, which the aim path writes, so the plane faces
+    // where the game shoots.
+    const std::array<ModToggle::Ptr, PLANE_COUNT> m_ui_follows_view{
+        ModToggle::create("UI_FollowView", false),
+        ModToggle::create("UI_Secondary_FollowView", false),
+    };
 
     const ModSlider::Ptr m_framework_distance{ ModSlider::create("UI_Framework_Distance", 0.5f, 10.0f, 1.75f) };
     const ModSlider::Ptr m_framework_size{ ModSlider::create("UI_Framework_Size", 0.5f, 10.0f, 2.0f) };
@@ -120,13 +162,20 @@ public:
     {
         m_options = { 
             *m_slate_overlay_type,
-            *m_slate_x_offset,
-            *m_slate_y_offset,
-            *m_slate_distance,
-            *m_slate_size,
             *m_slate_cylinder_angle,
-            *m_ui_follows_view,
             *m_ui_invert_alpha,
+            // Both planes, in index order. Written out rather than looped because m_options is a list of
+            // references built once, and spelling it out keeps the save order stable in existing configs.
+            *m_slate_x_offset[PLANE_GAME],
+            *m_slate_y_offset[PLANE_GAME],
+            *m_slate_distance[PLANE_GAME],
+            *m_slate_size[PLANE_GAME],
+            *m_ui_follows_view[PLANE_GAME],
+            *m_slate_x_offset[PLANE_SCRIPT],
+            *m_slate_y_offset[PLANE_SCRIPT],
+            *m_slate_distance[PLANE_SCRIPT],
+            *m_slate_size[PLANE_SCRIPT],
+            *m_ui_follows_view[PLANE_SCRIPT],
             *m_framework_distance,
             *m_framework_size,
             *m_framework_ui_follows_view,
@@ -145,9 +194,12 @@ private:
 
         }
 
+        // The plane index is the last argument and defaults to the game's plane, so every existing call site
+        // -- including the D3D11 path, which none of this touches -- keeps working unchanged.
         std::optional<std::reference_wrapper<XrCompositionLayerQuad>> generate_slate_quad(
             runtimes::OpenXR::SwapchainIndex swapchain = runtimes::OpenXR::SwapchainIndex::UI, 
-            XrEyeVisibility eye = XR_EYE_VISIBILITY_BOTH
+            XrEyeVisibility eye = XR_EYE_VISIBILITY_BOTH,
+            size_t plane = PLANE_GAME
         );
         std::optional<std::reference_wrapper<XrCompositionLayerCylinderKHR>> generate_slate_cylinder(
             runtimes::OpenXR::SwapchainIndex swapchain = runtimes::OpenXR::SwapchainIndex::UI, 
@@ -155,13 +207,14 @@ private:
         );
         std::optional<std::reference_wrapper<XrCompositionLayerBaseHeader>> generate_slate_layer(
             runtimes::OpenXR::SwapchainIndex swapchain = runtimes::OpenXR::SwapchainIndex::UI, 
-            XrEyeVisibility eye = XR_EYE_VISIBILITY_BOTH
+            XrEyeVisibility eye = XR_EYE_VISIBILITY_BOTH,
+            size_t plane = PLANE_GAME
         );
         std::optional<std::reference_wrapper<XrCompositionLayerQuad>> generate_framework_ui_quad();
         
     private:
-        XrCompositionLayerQuad m_slate_layer{};
-        XrCompositionLayerQuad m_slate_layer_right{};
+        std::array<XrCompositionLayerQuad, PLANE_COUNT> m_slate_layer{};
+        std::array<XrCompositionLayerQuad, PLANE_COUNT> m_slate_layer_right{};
         XrCompositionLayerCylinderKHR m_slate_layer_cylinder{};
         XrCompositionLayerCylinderKHR m_slate_layer_cylinder_right{};
         XrCompositionLayerQuad m_framework_ui_layer{};

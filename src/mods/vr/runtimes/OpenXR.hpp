@@ -337,6 +337,10 @@ public:
         UI_RIGHT, // For 2D view with stereoscopic
         FRAMEWORK_UI,
 
+        // A second UI plane, fed from a render target a script hands us. Unused unless a script sets a
+        // source, so the swapchain is created but stays untouched otherwise.
+        UI_SECONDARY,
+
         EXTRA_END,
 
         AFR_START,
@@ -354,6 +358,12 @@ public:
         STANDARD_COUNT = STANDARD_END - STANDARD_START,
         EXTRA_COUNT = EXTRA_END - EXTRA_START,
     };
+
+    // Which swapchain a UI plane's picture lives in. Plane 0 is the interface the game draws; plane 1 is fed
+    // by a script. Kept here next to the names so the copy and the submit cannot disagree about it.
+    static constexpr SwapchainIndex ui_plane_swapchain(size_t plane) {
+        return plane == 0 ? SwapchainIndex::UI : SwapchainIndex::UI_SECONDARY;
+    }
 
     struct Action {
         std::vector<XrAction> action_collection{};
