@@ -1438,6 +1438,20 @@ void set_secondary_ui_source(UEVR_UObjectHandle texture) {
     VR::get()->set_secondary_ui_source((sdk::UTexture*)texture);
 }
 
+// The result comes back through out parameters rather than a return value: the C API's function pointers carry no
+// way to hand back a pair. Both are optional, so a caller that does not care can pass null.
+void set_flat_window_size(unsigned int width, unsigned int height, unsigned int* out_width, unsigned int* out_height) {
+    const auto got = VR::get()->set_flat_window_size(width, height);
+
+    if (out_width != nullptr) {
+        *out_width = got[0];
+    }
+
+    if (out_height != nullptr) {
+        *out_height = got[1];
+    }
+}
+
 void save_config() {
     g_framework->deferred_save_config();
 }
@@ -1500,6 +1514,7 @@ UEVR_VRData g_vr_data {
     .save_config = uevr::vr::save_config,
     .reload_config = uevr::vr::reload_config,
     .set_secondary_ui_source = uevr::vr::set_secondary_ui_source,
+    .set_flat_window_size = uevr::vr::set_flat_window_size,
 };
 
 

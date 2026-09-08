@@ -574,6 +574,23 @@ int ScriptContext::setup_bindings() {
             }
 
             self.set_secondary_ui_source((UEVR_UObjectHandle)obj.as<uevr::API::UObject*>());
+        },
+        // Resize the game's FLAT window so its client area is exactly this, and return what it actually became --
+        // two values, width then height, both zero if the window could not be reached.
+        //
+        // WHY A SCRIPT WOULD: the game lays its interface out to that window and draws it into a texture of the same
+        // size, so the window's shape is the interface's shape. Given the headset's shape -- get_hmd_width and
+        // get_hmd_height are right here -- the game re-lays its interface for the view the player is actually in.
+        //
+        // NARROW BY DESIGN. Two numbers, bounded on the other side, acting on the window this process already owns.
+        // No handle, no style, no flags: there is nothing here to point at another program.
+        "set_flat_window_size", [](sol::this_state s, UEVR_VRData& self, unsigned int width, unsigned int height) {
+            unsigned int got_w{};
+            unsigned int got_h{};
+
+            self.set_flat_window_size(width, height, &got_w, &got_h);
+
+            return std::make_tuple(got_w, got_h);
         }
     );
 
