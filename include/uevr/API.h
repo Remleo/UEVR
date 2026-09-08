@@ -628,6 +628,22 @@ typedef struct {
        Everything else about the layer is a config value (UI_Secondary_*), reachable through
        set_mod_value, because only a pointer cannot travel as a string. */
     void (*set_secondary_ui_source)(UEVR_UObjectHandle texture);
+
+    /* Resize the game's FLAT window so its CLIENT AREA is exactly width by height, and report back what it
+       actually became. Zero on either side of the result means the window could not be reached.
+
+       WHY A VR API CARES ABOUT THE FLAT WINDOW. The game draws its interface into a texture the size of that
+       window, and Slate lays the interface out to the window as well -- so the window's shape is the
+       interface's shape. A 16:9 window puts a wide band of HUD across a nearly square view, with empty room
+       above and below it that no plane setting can fill. Given the headset's own shape, the game re-lays its
+       interface to match.
+
+       DELIBERATELY NARROW. No window handle from the caller, no style, no flags: a script can ask for a size
+       for the window this process already owns, and nothing else. The size is bounded on the other side.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    void (*set_flat_window_size)(unsigned int width, unsigned int height, unsigned int* out_width, unsigned int* out_height);
 } UEVR_VRData;
 
 struct lua_State;

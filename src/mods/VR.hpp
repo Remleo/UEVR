@@ -669,6 +669,13 @@ public:
         return plane < m_ui_source_size.size() ? m_ui_source_size[plane] : std::array<uint32_t, 2>{0, 0};
     }
 
+    // THE FLAT WINDOW'S CLIENT AREA, set and reported back. See the implementation for why a VR mod resizes the
+    // desktop window at all, and for the one flag that makes it possible.
+    //
+    // Narrow on purpose, because a script can call it: no window handle from the caller, no style, no flags, and
+    // the size is bounded. What it can do is ask for a size for the window this process already owns.
+    std::array<uint32_t, 2> set_flat_window_size(uint32_t width, uint32_t height);
+
 
 
     bool is_ahud_compatibility_enabled() const {

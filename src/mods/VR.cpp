@@ -2438,6 +2438,99 @@ void VR::on_post_present() {
     }
 }
 
+// WHY A VR MOD RESIZES THE DESKTOP WINDOW. The game draws its interface into a texture the size of that window, and
+// Slate lays the interface out to the window as well -- measured, both. So the window's shape IS the interface's
+// shape, and no plane setting can work around it: a 16:9 window puts a wide band of HUD across a nearly square view
+// with empty room above and below that nothing fills, because content pushed past the frame's edge is cut rather
+// than revealed. Handed the headset's own shape, the game re-lays its interface to match.
+//
+// SWP_NOSENDCHANGING IS THE WHOLE TRICK, and it was found by measurement. A plain resize is clamped to the monitor's
+// height -- asking for 2048 tall on a 1440 tall screen came back 1440 -- and the clamp is the GAME's, applied in its
+// own WM_WINDOWPOSCHANGING handler. The flag skips that message, and the window is then free to be larger than the
+// screen. It hangs off the edge, which costs nothing in VR: the flat window is only a mirror.
+//
+// The frame is left alone. AdjustWindowRect works out the outer size that yields the client area asked for, so there
+// is no need to strip the title bar -- an earlier attempt did, and it was needless.
+std::array<uint32_t, 2> VR::set_flat_window_size(uint32_t width, uint32_t height) {
+    // BOUNDED, because this is reachable from a script. A zero would reach a texture creation as a zero, and a
+    // number in the millions would ask for a frame nobody can allocate.
+    constexpr uint32_t min_side = 64;
+    constexpr uint32_t max_side = 8192;
+
+    if (width < min_side || height < min_side || width > max_side || height > max_side) {
+        SPDLOG_ERROR("[VR] set_flat_window_size refused {}x{}: outside {}..{}", width, height, min_side, max_side);
+
+        return {0, 0};
+    }
+
+    const auto wnd = g_framework->get_window();
+
+    if (wnd == nullptr) {
+        SPDLOG_ERROR("[VR] set_flat_window_size has no window to resize yet");
+
+        return {0, 0};
+    }
+
+    // ALREADY THIS SIZE: TOUCH NOTHING. This is not a micro-optimisation, it is the difference between a call that is
+    // free to repeat and one that is not.
+    //
+    // SetWindowPos with an unchanged size still reaches the game as a window message, and this engine answers it the
+    // expensive way: it rebuilds its swapchain and drops its render targets. Anything holding one of the game's textures
+    // is then holding freed memory -- which is exactly what the second UI plane does, and what the scene capture
+    // reference does.
+    //
+    // Measured: a script asking for the same size every five seconds for a 25 minute session, roughly three hundred
+    // times. The window never changed and nothing said so, while the log showed the scene capture texture being dropped
+    // and the UI plane's source going out of the object table, each time at the start of a stall.
+    //
+    // A caller that insists is behaving sensibly -- it cannot see the window, and the game might take the size back --
+    // so the cheap answer belongs here, where the window is.
+    RECT current{};
+
+    if (GetClientRect(wnd, &current)) {
+        const auto current_w = (uint32_t)(current.right - current.left);
+        const auto current_h = (uint32_t)(current.bottom - current.top);
+
+        if (current_w == width && current_h == height) {
+            return {current_w, current_h};
+        }
+    }
+
+    RECT wanted{0, 0, (LONG)width, (LONG)height};
+    const auto style = GetWindowLongW(wnd, GWL_STYLE);
+
+    if (!AdjustWindowRect(&wanted, (DWORD)style, FALSE)) {
+        SPDLOG_ERROR("[VR] set_flat_window_size could not work out the frame size");
+
+        return {0, 0};
+    }
+
+    // Said once per actual resize, and now that repeats are free this line marks every window message the game will get
+    // from here -- the thing to count if the interface ever starts rebuilding on its own.
+    SPDLOG_INFO("[VR] Flat window is being resized to {}x{}", width, height);
+
+    SetWindowPos(wnd, nullptr, 0, 0,
+        wanted.right - wanted.left, wanted.bottom - wanted.top,
+        SWP_NOSENDCHANGING | SWP_NOZORDER | SWP_NOMOVE);
+
+    // READ BACK, NOT ASSUMED. A silent clamp is exactly what this function exists to defeat, so the caller is told
+    // what the window actually became rather than what it was asked for.
+    RECT got{};
+
+    if (!GetClientRect(wnd, &got)) {
+        return {0, 0};
+    }
+
+    const auto got_w = (uint32_t)(got.right - got.left);
+    const auto got_h = (uint32_t)(got.bottom - got.top);
+
+    if (got_w != width || got_h != height) {
+        SPDLOG_INFO("[VR] Flat window asked for {}x{}, became {}x{}", width, height, got_w, got_h);
+    }
+
+    return {got_w, got_h};
+}
+
 uint32_t VR::get_hmd_width() const {
     if (m_2d_screen_mode->value()) {
         if (get_runtime()->is_openxr()) {
