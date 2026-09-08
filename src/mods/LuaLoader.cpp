@@ -77,6 +77,14 @@ void LuaLoader::on_frame() {
 
     m_states_to_delete.clear();
 
+    // Same call the "Reset scripts" button makes, on a key instead. Returns right after: the reset
+    // replaces the state list, and walking it in the same frame would walk what was just thrown away.
+    if (m_keybind_reset_scripts->is_key_down_once()) {
+        spdlog::info("[LuaLoader] Resetting scripts from the keybind");
+        reset_scripts();
+        return;
+    }
+
     if (m_main_state == nullptr) {
         return;
     }
@@ -174,6 +182,7 @@ void LuaLoader::on_draw_sidebar_entry(std::string_view in_entry) {
         }
 
         m_log_to_disk->draw("Log Lua Errors to Disk");
+        m_keybind_reset_scripts->draw("Reset Scripts Key");
 
         auto last_script_error = m_main_state != nullptr ? m_main_state->get_last_script_error() : std::nullopt;
 
