@@ -618,6 +618,16 @@ typedef struct {
     void (*get_mod_value)(const char* key, char* value, unsigned int value_size);
     void (*save_config)();
     void (*reload_config)();
+
+    /* The source for the secondary UI layer: a texture, normally the render target a UWidgetComponent
+       draws its widget into. Null takes the layer away.
+
+       Appended at the end of the struct on purpose -- inserting anywhere else would shift every field
+       after it and break plugins built against an older header.
+
+       Everything else about the layer is a config value (UI_Secondary_*), reachable through
+       set_mod_value, because only a pointer cannot travel as a string. */
+    void (*set_secondary_ui_source)(UEVR_UObjectHandle texture);
 } UEVR_VRData;
 
 struct lua_State;

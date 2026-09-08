@@ -1427,6 +1427,17 @@ void get_mod_value(const char* key, char* out_value, unsigned int max_size) {
     }
 }
 
+// Hand a texture over to be presented as the secondary UI layer, or null to take it away.
+//
+// Nothing is validated beyond the null case: the pointer comes from a script that already found the object
+// through the reflection API, and the resolution that follows runs on the render thread where a bad
+// pointer is caught by the same guards the scene capture uses.
+void set_secondary_ui_source(UEVR_UObjectHandle texture) {
+    SPDLOG_INFO("[PluginLoader] set_secondary_ui_source({:x})", (uintptr_t)texture);
+
+    VR::get()->set_secondary_ui_source((sdk::UTexture*)texture);
+}
+
 void save_config() {
     g_framework->deferred_save_config();
 }
@@ -1488,6 +1499,7 @@ UEVR_VRData g_vr_data {
     .get_mod_value = uevr::vr::get_mod_value,
     .save_config = uevr::vr::save_config,
     .reload_config = uevr::vr::reload_config,
+    .set_secondary_ui_source = uevr::vr::set_secondary_ui_source,
 };
 
 

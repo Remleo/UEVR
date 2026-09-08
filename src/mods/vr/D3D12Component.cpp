@@ -406,6 +406,59 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             if (fw_rt && g_framework->is_drawing_anything()) {
                 m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI, g_framework->get_rendertarget_d3d12().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
+
+            // Script-fed UI planes. The game's own plane was filled above, so this starts past it -- the loop
+            // is over planes, and the index is the only thing that differs.
+            //
+            // Resolved fresh every frame rather than cached: the engine is free to recreate a render target's
+            // resource, and a stale pointer here would be a copy from freed memory.
+            for (size_t plane = OverlayComponent::PLANE_SCRIPT; plane < OverlayComponent::PLANE_COUNT; ++plane) {
+                if (!vr->is_ui_source_ready(plane)) {
+                    continue;
+                }
+
+                // IS IT STILL THERE, asked BEFORE the object is touched. Loading a save destroys the render target a
+                // script gave us and nothing announces it: the game came down inside this DLL on the frame after the
+                // target lost its resource, reading through a pointer to a destroyed object. The check is a lookup in
+                // the engine's object table, so it costs nothing and does not read the object at all.
+                if (!vr->is_ui_source_alive(plane)) {
+                    vr->drop_ui_source(plane);
+                    continue;
+                }
+
+                const auto rhi = vr->get_ui_source(plane)->get_texture_rhi();
+                const auto native = rhi != nullptr ? (ID3D12Resource*)rhi->get_native_resource() : nullptr;
+
+                if (native != nullptr) {
+                    // COPIED AS A REGION, NOT AS A WHOLE RESOURCE. CopyResource demands identical
+                    // dimensions, and these two are not: the swapchain is as large as the UI one because it
+                    // is created at session start, long before a script picks a source.
+                    //
+                    // The region lands at the swapchain's origin and the layer crops to it, so the rest of
+                    // the swapchain is never sampled and never needs clearing.
+                    const auto desc = native->GetDesc();
+                    const auto swapchain_idx = (uint32_t)runtimes::OpenXR::ui_plane_swapchain(plane);
+                    const auto& plane_swapchain = vr->m_openxr->swapchains[swapchain_idx];
+
+                    SPDLOG_INFO_ONCE("[VR] UI plane {} source is {}x{} format {}, swapchain is {}x{}",
+                        plane, (uint32_t)desc.Width, (uint32_t)desc.Height, (uint32_t)desc.Format,
+                        plane_swapchain.width, plane_swapchain.height);
+
+                    vr->set_ui_source_size(plane, (uint32_t)desc.Width, (uint32_t)desc.Height);
+
+                    D3D12_BOX src_box{};
+                    src_box.left = 0;
+                    src_box.top = 0;
+                    src_box.right = (UINT)desc.Width;
+                    src_box.bottom = (UINT)desc.Height;
+                    src_box.front = 0;
+                    src_box.back = 1;
+
+                    m_openxr.copy(swapchain_idx, native, std::nullopt, std::nullopt, ENGINE_SRC_COLOR, &src_box);
+                } else {
+                    SPDLOG_INFO_ONCE("[VR] UI plane {} source has no native resource this frame, it will be blank", plane);
+                }
+            }
         } else if (is_2d_screen) {
             m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI, m_2d_screen_tex[0].texture.Get(), draw_2d_view, clear_rt, ENGINE_SRC_COLOR);
         } else if (m_game_ui_tex.commands.ready()) {
@@ -679,6 +732,28 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                 }   
             }
             
+            // Script-fed UI planes, each on its own swapchain and its own settings, built by the same code as
+            // the plane above -- the index is the only difference.
+            //
+            // Pushed AFTER the game's plane so they draw over it: the point of a second plane is a piece of
+            // interface that has to stay readable against the rest.
+            for (size_t plane = OverlayComponent::PLANE_SCRIPT; plane < OverlayComponent::PLANE_COUNT; ++plane) {
+                if (!m_openxr.ever_acquired((uint32_t)runtimes::OpenXR::ui_plane_swapchain(plane))) {
+                    continue;
+                }
+
+                if (!vr->is_ui_source_ready(plane) || !vr->is_ui_source_alive(plane)) {
+                    continue;
+                }
+
+                const auto plane_layer = openxr_overlay.generate_slate_layer(
+                    runtimes::OpenXR::ui_plane_swapchain(plane), XrEyeVisibility::XR_EYE_VISIBILITY_BOTH, plane);
+
+                if (plane_layer) {
+                    quad_layers.push_back(&plane_layer->get());
+                }
+            }
+
             if (m_openxr.ever_acquired((uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI)) {
                 const auto framework_quad = openxr_overlay.generate_framework_ui_quad();
                 if (framework_quad) {
@@ -1534,6 +1609,13 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
 
     // The UI texture
     if (auto err = create_swapchain((uint32_t)runtimes::OpenXR::SwapchainIndex::UI, desktop_rt_swapchain_create_info, desktop_rt_desc)) {
+        return err;
+    }
+
+    // The script-fed UI plane's texture. Created unconditionally, the same size as the others, so a script can
+    // turn that plane on at any moment without a swapchain rebuild mid-session. Nothing is copied into it and
+    // nothing is submitted from it until a script sets a source.
+    if (auto err = create_swapchain((uint32_t)runtimes::OpenXR::SwapchainIndex::UI_SECONDARY, desktop_rt_swapchain_create_info, desktop_rt_desc)) {
         return err;
     }
 

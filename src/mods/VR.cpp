@@ -13,7 +13,11 @@
 #include <sdk/Globals.hpp>
 #include <sdk/CVar.hpp>
 #include <sdk/threading/GameThreadWorker.hpp>
+#include <sdk/threading/RenderThreadWorker.hpp>
 #include <sdk/UGameplayStatics.hpp>
+#include <sdk/UTexture.hpp>
+// The object table, for asking whether a script's texture is still there without touching it.
+#include <sdk/UObjectArray.hpp>
 #include <sdk/APlayerController.hpp>
 
 #include <tracy/Tracy.hpp>
@@ -1951,6 +1955,159 @@ void VR::on_pre_imgui_frame() {
     if (!m_disable_overlay) {
         m_overlay_component.on_pre_imgui_frame();
     }
+}
+
+// Hand a render target over to be presented as the secondary UI layer, or null to take it away.
+//
+// The pointer is only stored here. Walking down to the native resource needs an offset inside UTexture
+// that is only discoverable once the engine has actually created the resource, and that lookup has to run
+// on the render thread -- the scene capture resolves it the same way. So the work is enqueued and the
+// layer stays quiet until it succeeds. Nothing here touches rendering state on the calling thread.
+//
+// Logged loudly on purpose: this is reached from a script, and the failure modes are all invisible
+// otherwise -- a texture that never gets a resource, a lookup that never lands, a source replaced twice.
+void VR::set_secondary_ui_source(sdk::UTexture* tex) {
+    // Named once instead of spelled out at every use: the index is the whole subject of this function.
+    constexpr auto plane = vrmod::OverlayComponent::PLANE_SCRIPT;
+
+    if (tex == m_ui_source[plane]) {
+        SPDLOG_INFO("[VR] Secondary UI source unchanged ({:x})", (uintptr_t)tex);
+        return;
+    }
+
+    m_ui_source[plane] = tex;
+    m_ui_source_offset_ready[plane] = false;
+    m_ui_source_size[plane] = {0, 0};
+    m_ui_source_index[plane] = -1;
+    m_ui_source_serial[plane] = 0;
+
+    if (tex == nullptr) {
+        SPDLOG_INFO("[VR] Secondary UI source cleared, the layer will stop being submitted");
+        return;
+    }
+
+    // WHERE IT SITS IN THE OBJECT TABLE, taken now, while the object is certainly alive. Loading a save destroys it
+    // and nothing tells us; with the index and serial recorded here, the render path can ask the table whether the
+    // slot still holds this object instead of reading a flag off memory that may already be freed.
+    if (auto* objects = sdk::FUObjectArray::get(); objects != nullptr) {
+        const auto index = (int32_t)((sdk::UObjectBase*)tex)->get_internal_index();
+        auto* item = objects->get_object(index);
+
+        if (item != nullptr && item->object == (sdk::UObjectBase*)tex) {
+            m_ui_source_index[plane] = index;
+            m_ui_source_serial[plane] = item->serial_number;
+        } else {
+            SPDLOG_ERROR("[VR] Secondary UI source is not in the object table, refusing it");
+            m_ui_source[plane] = nullptr;
+            return;
+        }
+    }
+
+    SPDLOG_INFO("[VR] Secondary UI source set to {:x}, resolving its resource offset on the render thread",
+        (uintptr_t)tex);
+
+    // Retried every render loop until the resource exists. Returning false asks for another attempt, and
+    // the timeout below stops a texture that never materializes from spinning forever.
+    RenderThreadWorker::get().enqueue_conditional([this, tex]() -> bool {
+        if (m_ui_source[plane] != tex) {
+            SPDLOG_INFO("[VR] Secondary UI source changed while resolving, dropping the old attempt");
+            return true;
+        }
+
+        // THE POINTER BEING UNCHANGED IS NOT THE SAME AS THE OBJECT BEING ALIVE, and the difference cost a crash: this
+        // lambda dereferenced a render target that a save load had destroyed, at VR.cpp's get_texture_rhi call, one
+        // access violation inside this DLL. The comparison above only says nobody handed us a DIFFERENT source.
+        //
+        // So the table is asked, exactly as the render path asks it. This runs on the render thread while the game
+        // thread is free to destroy objects, so there is no moment at which the raw pointer alone can be trusted.
+        //
+        // Giving up rather than retrying: the object is gone for good, and the script hands over a fresh target when the
+        // next level has one.
+        if (!is_ui_source_alive(plane)) {
+            SPDLOG_INFO("[VR] Secondary UI source died before it resolved -- dropping it");
+            drop_ui_source(plane);
+
+            return true;
+        }
+
+        if (!sdk::UTexture::update_render_resource_offset_texture2d(tex)) {
+            SPDLOG_INFO_ONCE("[VR] Secondary UI source has no resource yet, will keep trying");
+            return false;
+        }
+
+        const auto rhi = tex->get_texture_rhi();
+
+        if (rhi == nullptr) {
+            SPDLOG_INFO_ONCE("[VR] Secondary UI source resolved an offset but has no RHI texture yet");
+            return false;
+        }
+
+        const auto native = rhi->get_native_resource();
+
+        if (native == nullptr) {
+            SPDLOG_INFO_ONCE("[VR] Secondary UI source has an RHI texture but no native resource yet");
+            return false;
+        }
+
+        m_ui_source_offset_ready[plane] = true;
+
+        SPDLOG_INFO("[VR] Secondary UI source is ready: rhi {:x}, native {:x}",
+            (uintptr_t)rhi, (uintptr_t)native);
+
+        return true;
+    },
+    []() {
+        // Said out loud rather than left silent: from a script's side a texture that never resolves looks
+        // exactly like a layer that was never asked for.
+        SPDLOG_ERROR("[VR] Secondary UI source never produced a native resource, giving up");
+    },
+    std::chrono::seconds{5});
+}
+
+// ASKED OF THE TABLE, NOT OF THE OBJECT. Loading a save destroys the render target a script gave us, and reading a
+// flag off the object to learn that would mean reading memory that may already be freed -- which is how the game
+// came down inside this DLL, one frame after the target lost its resource.
+//
+// The slot has to still hold this pointer AND carry the serial number it had when it was accepted. The serial is what
+// catches a reused slot: a fresh object landing at the same index would otherwise look like ours.
+bool VR::is_ui_source_alive(size_t plane) const {
+    if (plane >= m_ui_source.size() || m_ui_source[plane] == nullptr) {
+        return false;
+    }
+
+    if (m_ui_source_index[plane] < 0) {
+        return false;
+    }
+
+    auto* objects = sdk::FUObjectArray::get();
+
+    if (objects == nullptr) {
+        // Without the table there is no way to tell, and guessing "alive" is what crashed. Guess the other way.
+        return false;
+    }
+
+    auto* item = objects->get_object(m_ui_source_index[plane]);
+
+    if (item == nullptr) {
+        return false;
+    }
+
+    return item->object == (sdk::UObjectBase*)m_ui_source[plane]
+        && item->serial_number == m_ui_source_serial[plane];
+}
+
+void VR::drop_ui_source(size_t plane) {
+    if (plane >= m_ui_source.size()) {
+        return;
+    }
+
+    SPDLOG_INFO("[VR] UI plane {} source is gone from the object table -- letting it go", plane);
+
+    m_ui_source[plane] = nullptr;
+    m_ui_source_offset_ready[plane] = false;
+    m_ui_source_size[plane] = {0, 0};
+    m_ui_source_index[plane] = -1;
+    m_ui_source_serial[plane] = 0;
 }
 
 void VR::handle_keybinds() {
