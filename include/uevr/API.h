@@ -658,6 +658,49 @@ typedef struct {
        Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
        plugins built against an older header. */
     void (*set_flat_window_size)(unsigned int width, unsigned int height, unsigned int* out_width, unsigned int* out_height);
+
+    /* Where a UI plane was last PUT, in the space it was submitted in. Plane 0 is the interface the game draws,
+       plane 1 is the one a script feeds. Returns the space the pose is expressed in, because the pose means
+       nothing without it: 0 the plane was not placed this frame (no answer), 1 view space -- head locked, so the
+       pose is relative to the head, 2 stage space -- the pose is relative to the standing origin.
+
+       WHY THE VR MOD HAS TO ANSWER THIS AT ALL. A script that must agree with what the player SEES on a plane
+       cannot work the placement out for itself. It is not one number: the anchoring changes with the aim path,
+       the rotation offset is written by that path with the controller flattened and smoothed, decoupled pitch is
+       put back in, and magnification swings the whole quad. A script rebuilding that would be a second copy of
+       the placement, and two copies of this particular code have already disagreed with each other -- which is
+       the one thing a reticle and the plane it sits on must never do. So the plane reports where it went.
+
+       Answered by the OpenXR quad path only. Under OpenVR, or with the interface drawn as a cylinder, there is
+       no single quad pose to report and the result is 0 rather than a plausible lie.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    unsigned int (*get_ui_quad_pose)(unsigned int plane, UEVR_Vector3f* out_position, UEVR_Quaternionf* out_rotation);
+
+    /* The rotation the aim path is driving the game's aim with RIGHT NOW: the same value, after the same
+       corrections, that is written into the view rotation and the rotation offset. Returns false if the aim
+       rotation is not being written at present -- no aim method active, no aim path yet, or the game paused long
+       enough for the last value to be a memory rather than a reading.
+
+       WHY THIS EXISTS RATHER THAN LETTING A PLUGIN BUILD IT. Every correction between the controller and the aim
+       belongs to the VR mod, and each is a thing a plugin cannot see: the pose taken is the runtime's AIM pose,
+       not the grip pose, so the controller's own shape is already accounted for by whoever knows it -- the
+       runtime; the ray is re-based onto the standing origin, so the offset between the hand and the eye is gone;
+       and `VR_AimInterp` smooths the result towards its target at `VR_AimSpeed`. A plugin reconstructing that from
+       `get_pose` gets the grip axis of a controller it cannot identify, with parallax, unsmoothed -- three
+       differences from what the player is looking at, one of which changes with the headset.
+
+       FORWARD IS -Z, THE SAME AS THE DEVICE POSES, and that is measured rather than read off the code. Inside the
+       aim path the direction is taken as `rotation * (0, 0, 1)` -- `to_quat` is a left-handed lookAt, and
+       `flatten`/`pitch_only` read it that way -- so the plain reading of the source says +Z. Against the runtime's
+       own aim pose in one set of axes, +Z came out as the exact opposite of where the hand was pointing and -Z
+       agreed with it to about two degrees, which is the smoothing. So the handedness cancels by the time the value
+       leaves here, and a caller should rotate (0, 0, -1) by it, exactly as with `get_pose` and `get_aim_pose`.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    bool (*get_smoothed_aim_rotation)(UEVR_Quaternionf* out_rotation);
 } UEVR_VRData;
 
 struct lua_State;

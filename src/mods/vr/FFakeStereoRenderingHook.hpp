@@ -293,6 +293,12 @@ public:
         return m_attempted_hook_slate_thread;
     }
 
+    // Handed out so the aim path's own smoothed rotation can be read from outside -- a plugin asking "where is the
+    // game being aimed" must get THAT value and not a second computation of it. Null until the hook is built.
+    auto& get_tracking_system_hook() {
+        return m_tracking_system_hook;
+    }
+
     bool has_attempted_to_hook_fsceneview() const {
         return m_attempted_hook_fsceneview_constructor;
     }

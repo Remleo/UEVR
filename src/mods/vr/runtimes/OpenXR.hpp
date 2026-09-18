@@ -392,6 +392,10 @@ public:
         XrAction action{};
     };
 
+    // Whether the grip-to-aim geometry of each controller has been written to the log yet. Once per session and
+    // per hand: it is a property of the hardware, so a second line would only repeat the first.
+    std::array<bool, 2> logged_aim_offset{};
+
     struct HandData {
         XrSpace grip_space{XR_NULL_HANDLE};
         XrSpace aim_space{XR_NULL_HANDLE};

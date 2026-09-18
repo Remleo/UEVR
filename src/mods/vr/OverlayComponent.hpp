@@ -54,7 +54,26 @@ public:
         return m_ui_invert_alpha->value();
     }
 
+    // WHERE A PLANE WAS LAST PUT, kept so a script can be told. `space` is what makes the pose readable at all:
+    // 0 nothing was placed this frame, 1 the pose is against the head, 2 against the standing origin. The
+    // reasoning for handing this out rather than letting a script rebuild it is in API.h, next to
+    // `get_ui_quad_pose`.
+    //
+    // WRITTEN BY THE QUAD PATH ONLY, and `space` staying 0 is how the cylinder path and OpenVR say "not me"
+    // instead of leaving last frame's pose to be read as current.
+    struct QuadPose {
+        unsigned int space{0};
+        glm::quat rotation{glm::identity<glm::quat>()};
+        glm::vec3 position{};
+    };
+
+    const QuadPose& get_last_quad_pose(size_t plane) const {
+        return m_last_quad_pose[plane < PLANE_COUNT ? plane : 0];
+    }
+
 private:
+    std::array<QuadPose, PLANE_COUNT> m_last_quad_pose{};
+
     // Cached data for imgui VR overlay so we know when we need to update it
     // instead of doing it constantly every frame
     struct {

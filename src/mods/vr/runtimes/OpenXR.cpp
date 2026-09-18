@@ -338,6 +338,29 @@ VRRuntime::Error OpenXR::update_poses(bool from_view_extensions, uint32_t frame_
             orientation_grip = glm::rotate(orientation_grip, glm::radians(pitch), Vector3f{1.0f, 0.0f, 0.0f});
         }
 
+        // THE CONTROLLER'S OWN GEOMETRY, PRINTED ONCE PER HAND. The angle between the grip pose and the aim pose is
+        // the runtime's description of the hardware in the player's hand, and it is tens of degrees: anything that
+        // reads the grip pose as "where the player is pointing" is off by it. It costs nothing to log and it is the
+        // first thing to look at when aiming built on poses behaves differently on another headset -- the number
+        // below is not the same on every controller, and that is the point of printing it rather than assuming it.
+        //
+        // Reported as the aim's forward IN GRIP AXES, so the log can be compared against what a script reads: the
+        // runtime's forward is -Z, so both directions are taken that way.
+        if (!this->logged_aim_offset[i] &&
+            (hand.aim_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0 &&
+            (hand.grip_location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0)
+        {
+            this->logged_aim_offset[i] = true;
+
+            const auto grip_to_aim = glm::normalize(glm::inverse(orientation_grip) * orientation_aim);
+            const auto forward = glm::normalize(grip_to_aim * Vector3f{0.0f, 0.0f, -1.0f});
+
+            spdlog::info("[VR] Hand {}: the aim pose sits {:.2f} degrees off the grip pose "
+                         "(aim forward in grip axes: right {:.4f}, up {:.4f}, forward {:.4f})",
+                         i, glm::degrees(glm::acos(glm::clamp(-forward.z, -1.0f, 1.0f))),
+                         forward.x, forward.y, -forward.z);
+        }
+
         this->grip_matrices[i] = Matrix4x4f{orientation_grip};
         this->grip_matrices[i][3] = Vector4f{*(Vector3f*)&hand.grip_location.pose.position, 1.0f};
     }

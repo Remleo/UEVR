@@ -1999,6 +1999,8 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
         }
 
         m_process_view_rotation_data.last_aim_rot = right_controller_forward_rot;
+        m_process_view_rotation_data.last_aim_update = now;
+        m_process_view_rotation_data.last_aim_valid = true;
 
         /*const auto previous_standing_origin = glm::vec3{vr->get_standing_origin()};
         static auto last_delta = glm::vec3{og_controller_pos};
