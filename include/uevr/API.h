@@ -235,6 +235,20 @@ typedef struct {
 
     /* Intended for C plugins to listen to via on_custom_event */
     void (*dispatch_custom_event)(const char* event_name, const char* event_data);
+
+    /* Ask for the Lua scripts to be reloaded. Takes effect on the next frame, never inside this call.
+
+       WHY DEFERRED, AND WHY THAT IS NOT A DETAIL. Reloading destroys every Lua state, including the one that made
+       this request -- doing it synchronously would free the stack the caller is still running on. So the request
+       only raises a flag, and the reload happens where the keybind's reload already happens: at the top of a
+       frame, before any state is walked.
+
+       WHY A SCRIPT WOULD WANT THIS. In a headset the reload keybind cannot be found by hand, so a script needs a
+       way to offer its own -- a gesture, a button in its own panel, a hotkey of its choosing.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    void (*request_script_reset)();
 } UEVR_PluginFunctions;
 
 typedef struct {

@@ -85,6 +85,17 @@ void LuaLoader::on_frame() {
         return;
     }
 
+    // Same treatment as the keybind, and for the same reason: the reset replaces the state list, so the frame ends
+    // here rather than walking what was just thrown away.
+    //
+    // THE FLAG IS WHY THIS IS SAFE. A script asking for a reload cannot be served inside its own call -- the reload
+    // destroys the state it is running on. Serving it here means the asking script has already returned.
+    if (m_reset_requested.exchange(false)) {
+        spdlog::info("[LuaLoader] Resetting scripts on request");
+        reset_scripts();
+        return;
+    }
+
     if (m_main_state == nullptr) {
         return;
     }
@@ -259,6 +270,10 @@ void LuaLoader::on_draw_sidebar_entry(std::string_view in_entry) {
             }
         }
     }
+}
+
+void LuaLoader::request_reset() {
+    m_reset_requested = true;
 }
 
 void LuaLoader::reset_scripts() {

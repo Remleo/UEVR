@@ -410,7 +410,10 @@ int ScriptContext::setup_bindings() {
         "get_build_time", &UEVR_PluginFunctions::get_build_time,
         "get_commits_past_tag", &UEVR_PluginFunctions::get_commits_past_tag,
         "get_total_commits", &UEVR_PluginFunctions::get_total_commits,
-        "dispatch_custom_event", &UEVR_PluginFunctions::dispatch_custom_event
+        "dispatch_custom_event", &UEVR_PluginFunctions::dispatch_custom_event,
+        // Reloads the scripts on the NEXT frame, not inside this call: the reload destroys the very state that asked,
+        // so serving it here would free the stack still being run. Discussion is in API.h.
+        "request_script_reset", &UEVR_PluginFunctions::request_script_reset
     );
 
     m_lua.new_usertype<UEVR_RendererData>("UEVR_RendererData",
