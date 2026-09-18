@@ -474,6 +474,15 @@ int ScriptContext::setup_bindings() {
         "get_left_controller_index", &UEVR_VRData::get_left_controller_index,
         "get_right_controller_index", &UEVR_VRData::get_right_controller_index,
         "get_pose", &UEVR_VRData::get_pose,
+        // THE RUNTIME'S AIM POSE, which is what "where is this controller pointing" actually means. `get_pose`
+        // hands over the GRIP pose -- the one meant for holding a thing, its axis along the handle -- and the
+        // angle between the two is a property of the controller, tens of degrees of it, different on every
+        // headset. A script that corrects for it by hand is writing down one player's hardware as a constant.
+        "get_aim_pose", &UEVR_VRData::get_aim_pose,
+        // Where a UI plane actually went, and the rotation the aim path is driving the game with. Both exist so a
+        // script can agree with what the player SEES instead of rebuilding placements the VR mod already made.
+        "get_ui_quad_pose", &UEVR_VRData::get_ui_quad_pose,
+        "get_smoothed_aim_rotation", &UEVR_VRData::get_smoothed_aim_rotation,
         "get_transform", &UEVR_VRData::get_transform,
         "get_eye_offset", &UEVR_VRData::get_eye_offset,
         "get_ue_projection_matrix", &UEVR_VRData::get_ue_projection_matrix,

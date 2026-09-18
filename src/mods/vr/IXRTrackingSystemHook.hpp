@@ -26,6 +26,14 @@ public:
         std::chrono::high_resolution_clock::time_point last_update{std::chrono::high_resolution_clock::now()};
         glm::quat last_aim_rot{glm::identity<glm::quat>()};
 
+        // WHEN `last_aim_rot` WAS LAST WRITTEN, which is not the same question as when this path last ran.
+        // `was_called` above goes true at the top of it, before the aim method is even looked at, so with no aim
+        // method active it stays true while the aim rotation is left at whatever it was when the aim was last
+        // live. A reader outside this class cannot tell those apart, and a stale aim rotation handed out as the
+        // current one is exactly the kind of answer that agrees with itself for as long as it is wrong.
+        std::chrono::high_resolution_clock::time_point last_aim_update{};
+        bool last_aim_valid{false};
+
         // Where the game was looking when the view started following the aim, with the hand taken out.
         // The view is then written as base * hand: an absolute direction, so it cannot drift.
         glm::quat aim_view_base{glm::identity<glm::quat>()};

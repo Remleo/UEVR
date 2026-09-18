@@ -816,6 +816,11 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 {
     auto& vr = VR::get();
 
+    // FORGOTTEN FIRST, SO THAT "NOT PLACED" IS THE TRUTH AND NOT A STALE POSE. Every early exit below means this
+    // plane goes nowhere this frame, and a script reading last frame's pose as current is the kind of lie that
+    // agrees with itself for as long as the plane stays gone.
+    m_parent->m_last_quad_pose[plane] = {};
+
     if (!vr->is_gui_enabled()) {
         m_parent->m_intersect_state.intersecting = false;
         return std::nullopt;
@@ -936,6 +941,15 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 
     layer.pose.orientation = runtimes::OpenXR::to_openxr(glm::quat_cast(glm_matrix));
     layer.pose.position = runtimes::OpenXR::to_openxr(glm_matrix[3]);
+
+    // REPORTED WHERE IT IS SUBMITTED, not where it was computed, and after every correction above -- the
+    // magnification swing included. A script asking where this plane is has to get the same pose the compositor
+    // does, or it is agreeing with an earlier draft of it.
+    m_parent->m_last_quad_pose[plane] = {
+        layer.space == vr->m_openxr->view_space ? 1u : 2u,
+        glm::quat_cast(glm_matrix),
+        glm::vec3{glm_matrix[3]}
+    };
 
     // The mouse belongs to the game's plane. A script-fed plane has no cursor to move and no menu to click,
     // and letting it write the shared intersection state would put two planes on one pointer.

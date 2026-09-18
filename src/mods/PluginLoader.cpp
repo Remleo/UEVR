@@ -1459,6 +1459,70 @@ void set_flat_window_size(unsigned int width, unsigned int height, unsigned int*
     }
 }
 
+// The space comes back as the RETURN VALUE, and the pose through out parameters: a caller that ignores the space
+// has a pose it cannot use, so it is the one thing that must not be optional.
+unsigned int get_ui_quad_pose(unsigned int plane, UEVR_Vector3f* out_position, UEVR_Quaternionf* out_rotation) {
+    const auto& pose = VR::get()->get_overlay_component().get_last_quad_pose((size_t)plane);
+
+    if (pose.space == 0) {
+        return 0;
+    }
+
+    if (out_position != nullptr) {
+        out_position->x = pose.position.x;
+        out_position->y = pose.position.y;
+        out_position->z = pose.position.z;
+    }
+
+    if (out_rotation != nullptr) {
+        out_rotation->x = pose.rotation.x;
+        out_rotation->y = pose.rotation.y;
+        out_rotation->z = pose.rotation.z;
+        out_rotation->w = pose.rotation.w;
+    }
+
+    return pose.space;
+}
+
+// A QUARTER OF A SECOND IS THE WHOLE OF "RIGHT NOW" HERE. The aim path runs a couple of times per frame while it is
+// live, so anything older than that is not a late reading, it is a different state: the aim method was turned off, or
+// the game stopped ticking. UEVR's own idle check on this data waits two seconds, which is right for "has this path
+// ever run" and far too long for "is this where the game is aiming".
+static constexpr auto s_aim_rotation_freshness = std::chrono::milliseconds(250);
+
+bool get_smoothed_aim_rotation(UEVR_Quaternionf* out_rotation) {
+    auto& stereo_hook = VR::get()->get_fake_stereo_hook();
+
+    if (stereo_hook == nullptr) {
+        return false;
+    }
+
+    auto& tracking_hook = stereo_hook->get_tracking_system_hook();
+
+    if (tracking_hook == nullptr) {
+        return false;
+    }
+
+    const auto& data = tracking_hook->get_process_view_rotation_data();
+
+    if (!data.last_aim_valid) {
+        return false;
+    }
+
+    if (std::chrono::high_resolution_clock::now() - data.last_aim_update >= s_aim_rotation_freshness) {
+        return false;
+    }
+
+    if (out_rotation != nullptr) {
+        out_rotation->x = data.last_aim_rot.x;
+        out_rotation->y = data.last_aim_rot.y;
+        out_rotation->z = data.last_aim_rot.z;
+        out_rotation->w = data.last_aim_rot.w;
+    }
+
+    return true;
+}
+
 void save_config() {
     g_framework->deferred_save_config();
 }
@@ -1522,6 +1586,8 @@ UEVR_VRData g_vr_data {
     .reload_config = uevr::vr::reload_config,
     .set_secondary_ui_source = uevr::vr::set_secondary_ui_source,
     .set_flat_window_size = uevr::vr::set_flat_window_size,
+    .get_ui_quad_pose = uevr::vr::get_ui_quad_pose,
+    .get_smoothed_aim_rotation = uevr::vr::get_smoothed_aim_rotation,
 };
 
 
