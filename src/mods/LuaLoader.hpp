@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <vector>
 #include <unordered_map>
@@ -63,6 +64,13 @@ public:
 
     // Resets the ScriptState and runs autorun scripts again.
     void reset_scripts();
+
+    // Ask for a reload from anywhere, including from inside a running script.
+    //
+    // NOT A RENAMED reset_scripts. That one destroys every Lua state, so calling it from a script would free the
+    // stack the caller is still running on. This only raises a flag; on_frame does the reload where the keybind
+    // already does it, before any state is walked.
+    void request_reset();
     void state_post_init(std::shared_ptr<ScriptState>& state);
     void add_additional_bindings(sol::state_view& lua);
     void dispatch_event(std::string_view event_name, std::string_view event_data);
@@ -100,6 +108,10 @@ private:
 
     bool m_console_spawned{false};
     bool m_needs_first_reset{true};
+
+    // Raised by request_reset, cleared by on_frame. Atomic because the request can come from a script running on
+    // the game thread while on_frame may still be on the DXGI thread before tick is hooked.
+    std::atomic<bool> m_reset_requested{false};
 
     const ModToggle::Ptr m_log_to_disk{ ModToggle::create(generate_name("LogToDisk"), false) };
 

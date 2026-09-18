@@ -127,6 +127,12 @@ void dispatch_lua_event(const char* event_name, const char* event_data) {
 void dispatch_custom_event(const char* event_name, const char* event_data) {
     PluginLoader::get()->dispatch_custom_event(event_name, event_data);
 }
+
+// Raises a flag; LuaLoader does the reload at the top of the next frame. See the comment in API.h for why this
+// cannot happen inside the call.
+void request_script_reset() {
+    LuaLoader::get()->request_reset();
+}
 }
 
 namespace uevr {
@@ -241,7 +247,8 @@ UEVR_PluginFunctions g_plugin_functions {
     .get_total_commits = []() -> unsigned int {
         return UEVR_TOTAL_COMMITS;
     },
-    .dispatch_custom_event = uevr::dispatch_custom_event
+    .dispatch_custom_event = uevr::dispatch_custom_event,
+    .request_script_reset = uevr::request_script_reset
 };
 
 #define GET_ENGINE_WORLD_RETNULL() \
