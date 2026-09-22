@@ -1,5 +1,36 @@
 # UEVR ![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
 
+## About this fork
+
+This is a fork of [praydog/UEVR](https://github.com/praydog/UEVR) where I fix and improve UEVR for the games I bring
+to VR: whatever a game needs to run, and whatever makes it play better. Builds are on the [Releases page](https://github.com/Remleo/UEVR/releases); each release
+lists what it changes on top of the nightly it is based on.
+
+- **STALKER 2** (Update 2, UE 5.5.4) is playable: no more freeze of about a minute after injection, cvars are found,
+  and the UI shows in the headset.
+- **The Outer Worlds 2**: console commands work again (`stat fps`, `user_script.txt`), and head tracking stays locked
+  behind fullscreen menus.
+
+Whatever is useful beyond my games goes to praydog as a pull request, and once he merges it or solves the problem
+his own way, the fork drops its version. UEVR is praydog's work: for documentation, support and donations use the
+links below, which all point to him.
+
+### Building and contributing
+
+- Work from the `remleo` branch, the default one here. Clone with submodules: `git clone --recursive`. Its UESDK
+  submodule points at [Remleo/UESDK](https://github.com/Remleo/UESDK), branch `remleo`, which carries the UESDK side
+  of the fixes.
+- `remleo` is praydog's `master` with the fork's commits on top, and it is rebased whenever `master` moves, so its
+  history is rewritten. Rebase your work onto it rather than merging it in.
+- The last commits on `remleo` are fork-only: this README and "Local only", which points the submodule at the
+  fork. They never go into a pull request to praydog.
+- A fix meant for praydog starts from his `master`, not from `remleo`, so the pull request carries only that fix.
+  Changes to UESDK go to [praydog/UESDK](https://github.com/praydog/UESDK) first.
+- Build as upstream does (CMake, Visual Studio 2022, target `uevr`); the output is `UEVRBackend.dll`, to be dropped
+  into a nightly package in place of praydog's.
+
+---
+
 Universal Unreal Engine VR Mod (4/5)
 
 ## Supported Engine Versions
