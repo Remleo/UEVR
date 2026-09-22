@@ -2768,6 +2768,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 ImGui::SetTooltip("When enabled, the aim turns the view instead of only the reticle, so the shot goes to the middle of the picture.");
             }
 
+            m_aim_view_keeps_head_roll->draw("Aim View Keeps Head Roll");
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Only with View Follows Aim. The aim keeps where the view looks, and tilting the head still tilts the world. Off, the head has no say in the picture and the horizon stays level whatever the head does.");
+            }
+
             ImGui::TreePop();
         }
 
@@ -3544,6 +3550,7 @@ glm::quat VR::apply_zoom_to_head_rotation(const glm::quat& head_rotation) {
 
     if (scale >= 1.0f) {
         m_zoom_head_reference_valid = false;
+        m_head_roll_twist = glm::identity<glm::quat>();
         m_zoom_view_rotation = head_rotation;
         return head_rotation;
     }
@@ -3553,12 +3560,25 @@ glm::quat VR::apply_zoom_to_head_rotation(const glm::quat& head_rotation) {
         m_zoom_head_reference_valid = true;
     }
 
-    // Held whole here, roll included: the world and the UI are both submitted head locked, so the
-    // compositor already tilts them together. Feeding roll in as well would tilt the world twice and the
-    // UI once, and they would come apart on a tilt.
+    // Held at the pose the aim took over at, because the render's rotation offset is the inverse of that
+    // same pose: the two cancel, and what is left between them is whatever is composed in here -- the
+    // head's roll, or nothing at all when the head is not to keep it.
+    //
+    // ROLL IS THE ONE COMPONENT THIS MODE CAN GIVE BACK TO THE HEAD. It turns the camera about its own
+    // forward axis, so the middle of the picture does not move and the reticle the game draws into the
+    // head locked UI still marks where the shot goes. The UI carries no roll of its own, so on a tilt it
+    // parts from the world's horizon -- the way a visor parts from the world, which is what keeping the
+    // roll is for.
+    //
+    // Only in the render, never in the aim path: told that the view is rolled, the game would roll the
+    // arms it animates up to the camera.
     if (following_aim) {
-        m_zoom_view_rotation = m_zoom_head_reference_rotation;
-        return m_zoom_head_reference_rotation;
+        const auto roll = is_aim_view_keeping_head_roll() ? head_roll_twist(head_rotation)
+                                                         : glm::identity<glm::quat>();
+
+        m_zoom_view_rotation = glm::normalize(m_zoom_head_reference_rotation * roll);
+
+        return m_zoom_view_rotation;
     }
 
     // Turn the view by angle/zoom so the eye and the inner ear agree again:
@@ -3579,6 +3599,28 @@ glm::quat VR::apply_zoom_to_head_rotation(const glm::quat& head_rotation) {
     m_zoom_view_rotation = glm::normalize(wanted_swing * glm::inverse(swing) * head_rotation);
 
     return m_zoom_view_rotation;
+}
+
+glm::quat VR::head_roll_twist(const glm::quat& head_rotation) {
+    // Forward is +Z: the same reading utility::math::flatten and to_quat take, and the same axis the render
+    // composes the result against.
+    const auto forward = glm::normalize(head_rotation * glm::vec3{0.0f, 0.0f, 1.0f});
+
+    // A levelled reference is a lookAt on the world's up, which has no answer when the head looks along
+    // that up -- 0.999 is two and a half degrees off vertical. Hold the last roll instead of falling back
+    // to none, or the picture would snap level as the player looks straight up.
+    if (glm::abs(forward.y) > 0.999f) {
+        return m_head_roll_twist;
+    }
+
+    // The head against a levelled version of itself. Both face the same way, so the rotation between them
+    // leaves the forward axis where it is, and a rotation that fixes an axis is a turn about it -- the
+    // roll, with no yaw or pitch left in it to take apart.
+    const auto levelled = utility::math::to_quat(forward);
+
+    m_head_roll_twist = glm::normalize(glm::inverse(levelled) * head_rotation);
+
+    return m_head_roll_twist;
 }
 
 void VR::recenter_view() {

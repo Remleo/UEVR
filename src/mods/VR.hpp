@@ -397,6 +397,14 @@ public:
         return m_view_follows_aim->value();
     }
 
+    // Whether the head keeps the roll while the view follows the aim. The aim owns where the view looks
+    // either way -- roll is the one component it has no opinion about, because turning the camera about
+    // its own forward axis does not move the point the shot goes to. Off, the head has no say in the
+    // picture at all and the horizon is whatever the game's camera has.
+    bool is_aim_view_keeping_head_roll() const {
+        return m_aim_view_keeps_head_roll->value();
+    }
+
     // Shrinks head rotation by the zoom factor, so magnification does not make the world move faster
     // than the head. For the view only -- see the implementation.
     glm::quat apply_zoom_to_head_rotation(const glm::quat& head_rotation);
@@ -777,6 +785,9 @@ public:
     }
 
 private:
+    // The head's roll about its own forward axis, and nothing else of the head.
+    glm::quat head_roll_twist(const glm::quat& head_rotation);
+
     Vector4f get_position_unsafe(uint32_t index) const;
     Vector4f get_velocity_unsafe(uint32_t index) const;
     Vector4f get_angular_velocity_unsafe(uint32_t index) const;
@@ -881,6 +892,10 @@ private:
 
     // What the world was last rendered for, kept for whoever has to agree with the picture.
     glm::quat m_zoom_view_rotation{glm::identity<glm::quat>()};
+
+    // The last roll the head could be measured at. Carried over the pole, where a levelled reference for
+    // the head cannot be built at all -- see head_roll_twist.
+    glm::quat m_head_roll_twist{glm::identity<glm::quat>()};
 
     HANDLE m_present_finished_event{CreateEvent(nullptr, TRUE, FALSE, nullptr)};
 
@@ -1087,6 +1102,7 @@ private:
     const ModSlider::Ptr m_camera_fov_distance_multiplier{ ModSlider::create(generate_name("CameraFOVDistanceMultiplier"), 0.00f, 1000.0f, 0.0f) };
     const ModSlider::Ptr m_zoom_factor{ ModSlider::create(generate_name("ZoomFactor"), 1.0f, 8.0f, 1.0f) };
     const ModToggle::Ptr m_view_follows_aim{ ModToggle::create(generate_name("ViewFollowsAim"), false) };
+    const ModToggle::Ptr m_aim_view_keeps_head_roll{ ModToggle::create(generate_name("AimViewKeepsHeadRoll"), false) };
     const ModSlider::Ptr m_world_scale{ ModSlider::create(generate_name("WorldScale"), 0.01f, 10.0f, 1.0f) };
     const ModSlider::Ptr m_depth_scale{ ModSlider::create(generate_name("DepthScale"), 0.01f, 1.0f, 1.0f) };
 
@@ -1206,6 +1222,7 @@ public:
             *m_camera_up_offset,
             *m_zoom_factor,
             *m_view_follows_aim,
+            *m_aim_view_keeps_head_roll,
             *m_world_scale,
             *m_depth_scale,
             *m_custom_z_near,
