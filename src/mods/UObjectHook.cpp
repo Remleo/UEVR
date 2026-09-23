@@ -820,6 +820,43 @@ void UObjectHook::try_register_create_listener() {
         num, notify_offset);
 }
 
+bool UObjectHook::is_object_live(sdk::UObjectBase* object) const {
+    if (object == nullptr) {
+        return false;
+    }
+
+    const auto arr = sdk::FUObjectArray::get();
+
+    if (arr == nullptr) {
+        // Nothing to ask, so nothing is claimed: the caller keeps whatever guarantees it had before.
+        return true;
+    }
+
+    uint32_t index = 0;
+
+    {
+        std::shared_lock _{m_mutex};
+
+        const auto it = m_meta_objects.find(object);
+
+        if (it == m_meta_objects.end()) {
+            return false;
+        }
+
+        index = it->second->internal_index;
+    }
+
+    // get_object checks only for a negative index; anything past the end reads outside the array.
+    if ((int32_t)index < 0 || (int32_t)index >= arr->get_object_count()) {
+        return false;
+    }
+
+    const auto item = arr->get_object((int32_t)index);
+
+    // The slot is reused by the next object that takes this index, so the pointer has to match as well.
+    return item != nullptr && (sdk::UObjectBase*)item->object == object;
+}
+
 void UObjectHook::unregister_create_listener() {
     if (!m_create_listener_registered || m_listeners_array == 0) {
         return;
@@ -943,6 +980,7 @@ void UObjectHook::add_new_object(sdk::UObjectBase* object) {
     meta_object->super_classes.clear();
     meta_object->full_name = object->get_full_name();
     meta_object->uclass = object->get_class();
+    meta_object->internal_index = object->get_internal_index(); // read while certainly alive -- see is_object_live
 
     m_most_recent_objects.push_front((sdk::UObject*)object);
 
@@ -1403,7 +1441,13 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
         if (!this->exists(comp) || it.second == nullptr) {
             continue;
         }
-        
+
+        // A save load frees the attached weapon, and this runs on the very next frame -- see is_object_live.
+        if (!this->is_object_live(comp)) {
+            ++m_debug.stale_objects_skipped;
+            continue;
+        }
+
         auto& state = *it.second;
         const auto orig_position = comp->get_world_location();
         const auto orig_rotation = comp->get_world_rotation();
@@ -2182,6 +2226,12 @@ void UObjectHook::update_motion_controller_components(
             continue;
         }
 
+        // Before the first read of the component: get_outer on a freed one is a crash -- see is_object_live.
+        if (!this->is_object_live(mc)) {
+            ++m_debug.stale_objects_skipped;
+            continue;
+        }
+
         if (mc->get_outer() == nullptr || !this->exists(mc->get_outer())) {
             continue;
         }
@@ -2606,6 +2656,7 @@ void UObjectHook::draw_developer() {
         ImGui::Text("Reconciled objects: %llu", m_debug.reconciled_objects);
         ImGui::Text("Listener notifications: %llu", m_debug.listener_notifications);
         ImGui::Text("Create listener: %s", m_create_listener_registered ? "registered" : "no");
+        ImGui::Text("Stale objects skipped: %llu", m_debug.stale_objects_skipped);
 
         // The gap between the engine array and our set. Normally it should sit near
         // zero; a persistently large value means creation coverage is incomplete.

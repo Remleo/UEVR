@@ -267,6 +267,17 @@ private:
     void try_register_create_listener();
     void unregister_create_listener();
 
+    // IS THIS POINTER STILL THE OBJECT WE RECORDED? Answered without touching the object: the index it had
+    // while alive is kept beside it, and the engine's own array is asked what lives at that index now. Being
+    // in our set proves nothing -- removal hangs on the destructor hook, found by signature, and on Stalker 2
+    // (UE 5.5.4) it misses destructions, so a save load left freed components in the set and the next frame
+    // read them.
+    //
+    // Do not replace this by subscribing to FUObjectDeleteListeners the way the create listener is: the engine
+    // keeps listeners of its own in that array (five on Stalker 2) and resizes it, and its allocator crashes in
+    // ntdll on a buffer it never allocated.
+    bool is_object_live(sdk::UObjectBase* object) const;
+
     // The derived result. Zero is a legal value for notify_offset (the method is first
     // in the vtable), so a separate flag tracks whether a result exists at all.
     uint32_t m_create_listeners_offset{0};
@@ -366,6 +377,10 @@ private:
 
         // How many notifications arrived from the engine via FUObjectCreateListener.
         uint64_t listener_notifications{0};
+
+        // Objects that were still in our set after the engine had freed them, caught by is_object_live. A
+        // rising count means the destructor hook is not seeing destructions on this build.
+        uint64_t stale_objects_skipped{0};
     } m_debug{};
 
     glm::vec3 m_last_left_grip_location{};
@@ -379,6 +394,10 @@ private:
         std::wstring full_name{};
         sdk::UClass* uclass{nullptr};
         std::vector<sdk::UClass*> super_classes{};
+
+        // The index the object held in GUObjectArray, read while it was certainly alive. That is what makes
+        // is_object_live answerable later without dereferencing the object.
+        uint32_t internal_index{0};
     };
 
     std::unordered_set<sdk::UObjectBase*> m_objects{};
