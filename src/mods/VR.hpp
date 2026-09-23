@@ -1140,6 +1140,12 @@ private:
     
     const ModString::Ptr m_requested_runtime_name{ ModString::create("Frontend_RequestedRuntime", "unset") };
 
+    // Settings the FRONTEND owns and the backend only carries, exactly as with the runtime name above.
+    // They have to be declared here or they do not survive: save_config rebuilds config.txt out of the
+    // mods' own values, so a key no mod knows is dropped the first time anything is saved.
+    const ModToggle::Ptr m_frontend_auto_inject{ ModToggle::create("Frontend_AutoInject", false) };
+    const ModString::Ptr m_frontend_auto_inject_delay{ ModString::create("Frontend_AutoInjectDelay", "0") };
+
     const ModToggle::Ptr m_lerp_camera_pitch{ ModToggle::create(generate_name("LerpCameraPitch"), false) };
     const ModToggle::Ptr m_lerp_camera_yaw{ ModToggle::create(generate_name("LerpCameraYaw"), false) };
     const ModToggle::Ptr m_lerp_camera_roll{ ModToggle::create(generate_name("LerpCameraRoll"), false) };
@@ -1246,6 +1252,8 @@ public:
             *m_keybind_disable_vr,
             *m_keybind_toggle_gui,
             *m_requested_runtime_name,
+            *m_frontend_auto_inject,
+            *m_frontend_auto_inject_delay,
             *m_show_fps,
             *m_show_statistics,
             *m_controllers_allowed,
