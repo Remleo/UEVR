@@ -209,6 +209,10 @@ Framework::Framework(HMODULE framework_module)
     spdlog::info("Game Module Addr: {:x}", (uintptr_t)m_game_module);
     spdlog::info("Game Module Size: {:x}", module_size);
 
+    // OUR OWN BASE, because a crash address means nothing without it. When the fault lands in this DLL the log
+    // is all there is: subtract this from the address to get the RVA the PDB resolves.
+    spdlog::info("UEVRBackend Addr: {:x}", (uintptr_t)GetModuleHandleW(L"UEVRBackend.dll"));
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
