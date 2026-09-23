@@ -615,6 +615,11 @@ bool UObjectHook::derive_create_listener_layout() {
 
     SPDLOG_INFO("[UObjectHook] candidate references to FUObjectArray fields: {}", candidates.size());
 
+    uint32_t best_field = 0;
+    uint32_t best_slot = 0;
+    uintptr_t best_site = 0;
+    bool found_any = false;
+
     // The three instructions of the dispatch loop sit back to back in one basic block,
     // so there is no need to follow branches -- a linear decode forward is enough.
     for (const auto cand : candidates) {
@@ -644,9 +649,15 @@ bool UObjectHook::derive_create_listener_layout() {
             continue;
         }
 
-        // Look for the triple: load Data -> indirect call through the vtable -> compare
-        // against Num, which must sit exactly 8 bytes past Data. That last part is what
-        // confirms this is a TArray and not an accidental address match.
+        // Look for the triple: load Data -> indirect call through the vtable -> a read of
+        // Num, which must sit exactly 8 bytes past Data. That last part is what confirms
+        // this is a TArray and not an accidental address match.
+        //
+        // THE READ OF NUM IS ANY INSTRUCTION THAT TOUCHES Data+8, not a CMP against memory.
+        // Which instruction carries it is the compiler's choice, and demanding one shape
+        // rejects the same loop built the other way: Stalker 2 (UE 5.5.4) loads Num with
+        // `movsxd rax, dword [Num]` and then compares two registers, so the only reference
+        // to the field is in the load.
         int32_t slot = -1;
         auto ip = ins_start;
 
@@ -667,16 +678,21 @@ bool UObjectHook::derive_create_listener_layout() {
                 }
             }
 
-            if (n > 0 && slot >= 0 && mnem.starts_with("CMP")) {
+            if (n > 0 && slot >= 0) {
                 if (auto t = utility::resolve_displacement(ip, &*decoded); t.has_value() && *t == data_field + 0x8) {
-                    m_create_listeners_offset = (uint32_t)(data_field - gua);
-                    m_create_listener_notify_offset = (uint32_t)slot;
-                    m_create_listener_layout_known = true;
+                    const auto field = (uint32_t)(data_field - gua);
 
-                    SPDLOG_WARN("[UObjectHook] found the create listener dispatch at 0x{:x}: UObjectCreateListeners at FUObjectArray+0x{:X}, NotifyUObjectCreated at vtable +0x{:X} (slot {})",
-                        ins_start, m_create_listeners_offset, m_create_listener_notify_offset, slot / 8);
+                    SPDLOG_INFO("[UObjectHook] listener dispatch at 0x{:x}: TArray at FUObjectArray+0x{:X}, notify at vtable +0x{:X} (slot {})",
+                        ins_start, field, (uint32_t)slot, slot / 8);
 
-                    return true;
+                    if (!found_any || field < best_field || (field == best_field && (uint32_t)slot < best_slot)) {
+                        found_any = true;
+                        best_field = field;
+                        best_slot = (uint32_t)slot;
+                        best_site = ins_start;
+                    }
+
+                    break;
                 }
             }
 
@@ -684,9 +700,26 @@ bool UObjectHook::derive_create_listener_layout() {
         }
     }
 
-    SPDLOG_ERROR("[UObjectHook] could not identify the create listener dispatch");
+    if (!found_any) {
+        SPDLOG_ERROR("[UObjectHook] could not identify the create listener dispatch");
 
-    return false;
+        return false;
+    }
+
+    // THE LOWEST FIELD, THEN THE LOWEST SLOT, and declaration order is the only thing that tells the
+    // matches apart. UObjectDeleteListeners is walked by an identical loop with the same (object, index)
+    // notify, but it is declared after the create listeners, so it sits at a higher offset. And the shutdown
+    // loop walks the create array too, calling OnUObjectArrayShutdown, which is declared after
+    // NotifyUObjectCreated and so sits at a higher slot. Taking whichever match comes first in the image
+    // subscribes to the wrong one, silently.
+    m_create_listeners_offset = best_field;
+    m_create_listener_notify_offset = best_slot;
+    m_create_listener_layout_known = true;
+
+    SPDLOG_WARN("[UObjectHook] found the create listener dispatch at 0x{:x}: UObjectCreateListeners at FUObjectArray+0x{:X}, NotifyUObjectCreated at vtable +0x{:X} (slot {})",
+        best_site, m_create_listeners_offset, m_create_listener_notify_offset, m_create_listener_notify_offset / 8);
+
+    return true;
 }
 
 void UObjectHook::try_register_create_listener() {
