@@ -820,6 +820,24 @@ void UObjectHook::try_register_create_listener() {
         num, notify_offset);
 }
 
+std::unordered_set<sdk::UObjectBase*> UObjectHook::get_objects_by_class(sdk::UClass* uclass) const {
+    std::unordered_set<sdk::UObjectBase*> result{};
+
+    {
+        std::shared_lock _{m_mutex};
+
+        if (auto it = m_objects_by_class.find(uclass); it != m_objects_by_class.end()) {
+            result = it->second;
+        }
+    }
+
+    std::erase_if(result, [this, uclass](sdk::UObjectBase* object) {
+        return uclass == nullptr || !is_object_live(object) || !((sdk::UObject*)object)->is_a(uclass);
+    });
+
+    return result;
+}
+
 bool UObjectHook::is_object_live(sdk::UObjectBase* object) const {
     if (object == nullptr) {
         return false;

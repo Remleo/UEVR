@@ -31,14 +31,12 @@ class UObjectHook : public Mod {
 public:
     static std::shared_ptr<UObjectHook>& get();
 
-    std::unordered_set<sdk::UObjectBase*> get_objects_by_class(sdk::UClass* uclass) const {
-        std::shared_lock _{m_mutex};
-        if (auto it = m_objects_by_class.find(uclass); it != m_objects_by_class.end()) {
-            return it->second;
-        }
-
-        return {};
-    }
+    // Only objects that are still alive AND still of the class asked for. Every caller dereferences what it gets, and the
+    // set keeps freed objects on builds where the destructor hook misses destructions (see is_object_live). Liveness
+    // alone is not enough: the engine reuses the freed memory and the same object slot for a new object, which then
+    // passes the liveness check under its old entry -- measured, a StaticMesh query returned a UMG Image. The class is
+    // read only after the object is known to be live. Filtered outside the lock, because is_object_live takes it again.
+    std::unordered_set<sdk::UObjectBase*> get_objects_by_class(sdk::UClass* uclass) const;
 
     bool exists(sdk::UObjectBase* object) const {
         std::shared_lock _{m_mutex};
