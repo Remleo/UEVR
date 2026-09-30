@@ -3,6 +3,10 @@
 #include <utility/Logging.hpp>
 #include <utility/String.hpp>
 #include <utility/ScopeGuard.hpp>
+// Needed to derive the callback dispatch layout from the game's code:
+// decode_one, resolve_displacement and the bounds of the executable module.
+#include <utility/Scan.hpp>
+#include <utility/Module.hpp>
 
 #include <sdk/UObjectBase.hpp>
 #include <sdk/UObjectArray.hpp>
@@ -112,28 +116,12 @@ void UObjectHook::hook() {
         return;
     }
 
-    auto add_object_fn = sdk::UObjectBase::get_add_object();
-
-    if (!add_object_fn) {
-        SPDLOG_ERROR("[UObjectHook] Failed to find UObjectBase::AddObject, cannot hook UObjectBase");
-        return;
-    }
-
     m_destructor_hook = safetyhook::create_inline((void**)destructor_fn.value(), &destructor);
 
     if (!m_destructor_hook) {
         SPDLOG_ERROR("[UObjectHook] Failed to hook UObjectBase::destructor, cannot hook UObjectBase");
         return;
     }
-
-    m_add_object_hook = safetyhook::create_inline((void**)add_object_fn.value(), &add_object);
-
-    if (!m_add_object_hook) {
-        SPDLOG_ERROR("[UObjectHook] Failed to hook UObjectBase::AddObject, cannot hook UObjectBase");
-        return;
-    }
-
-    SPDLOG_INFO("[UObjectHook] Hooked UObjectBase");
 
     // Add all the objects that already exist
     auto uobjectarray = sdk::FUObjectArray::get();
@@ -149,6 +137,51 @@ void UObjectHook::hook() {
     }
 
     SPDLOG_INFO("[UObjectHook] Added {} existing objects", m_objects.size());
+
+    // -----------------------------------------------------------------------
+    // Try the engine's own notification first, and only fall back to hooking AddObject
+    // if that did not work out.
+    //
+    // The order matters for two reasons.
+    //
+    // First, completeness. Hooking AddObject does not cover every creation when the
+    // function has been inlined (43% slipped past on this game), while the
+    // subscription is complete by construction.
+    //
+    // Second, and more important, safety. When AddObject is inlined, the stock UESDK
+    // search falls into its emergency branch and hands back an UNRELATED function.
+    // Hooking that before subscribing means the window between installing the hook and
+    // registering the listener -- and backfilling hundreds of thousands of objects
+    // takes time -- is spent dereferencing garbage arguments, which is exactly the
+    // original c0000005 symptom.
+    //
+    // The subscription happens after the backfill so the same objects are not
+    // processed twice.
+    // -----------------------------------------------------------------------
+    try_register_create_listener();
+
+    if (!m_create_listener_registered) {
+        auto add_object_fn = sdk::UObjectBase::get_add_object();
+
+        if (!add_object_fn) {
+            SPDLOG_ERROR("[UObjectHook] Failed to find UObjectBase::AddObject");
+        } else {
+            m_add_object_hook = safetyhook::create_inline((void**)add_object_fn.value(), &add_object);
+
+            if (!m_add_object_hook) {
+                SPDLOG_ERROR("[UObjectHook] Failed to hook UObjectBase::AddObject");
+            } else {
+                SPDLOG_WARN("[UObjectHook] engine notification unavailable -> falling back to hooking AddObject 0x{:x}. Coverage may be incomplete; the catch-up sweep closes the gap.",
+                    *add_object_fn);
+            }
+        }
+    } else {
+        SPDLOG_INFO("[UObjectHook] no AddObject hook needed: notifications arrive via FUObjectCreateListener");
+    }
+
+    ride_delete_listener();
+
+    SPDLOG_INFO("[UObjectHook] Hooked UObjectBase");
 
     SPDLOG_INFO("[UObjectHook] Deserializing persistent states");
     reload_persistent_states();
@@ -417,6 +450,693 @@ void* UObjectHook::process_event_hook(sdk::UObject* obj, sdk::UFunction* func, v
     return result;
 }
 
+// The key field in this line is "tracked": tick_attachments skips any component that
+// is not in m_objects (the exists() check in the attachment loop), so a state with
+// tracked=false gets registered and then never applied. That is precisely what used to
+// happen while AddObject was hooked incorrectly and m_objects stayed empty.
+void UObjectHook::log_new_motion_controller_state(sdk::USceneComponent* component) {
+    bool tracked = false;
+    size_t tracked_total = 0;
+    std::string name{};
+
+    {
+        std::shared_lock _{m_mutex};
+
+        tracked = exists_unsafe((sdk::UObjectBase*)component);
+        tracked_total = m_objects.size();
+
+        if (auto it = m_meta_objects.find((sdk::UObjectBase*)component); it != m_meta_objects.end()) {
+            name = utility::narrow(it->second->full_name);
+        }
+    }
+
+    // Look the pointer up in the engine's object array. This separates the two causes
+    // of tracked=false, which call for completely different fixes:
+    //   index >= 0  -- the object IS in GUObjectArray, so we missed its creation;
+    //                  the UObjectBase constructor is inlined into some callers;
+    //   index == -1 -- the object is not in the array at all, so Lua handed us a bad
+    //                  pointer and the hook has nothing to do with it.
+    // A linear pass over ~500k entries is acceptable: states are created rarely.
+    int32_t index = -1;
+
+    if (auto arr = sdk::FUObjectArray::get(); arr != nullptr) {
+        const auto count = arr->get_object_count();
+
+        for (int32_t i = 0; i < count; ++i) {
+            const auto item = arr->get_object(i);
+
+            if (item != nullptr && (void*)item->object == (void*)component) {
+                index = i;
+                break;
+            }
+        }
+    }
+
+    // Read the name directly, but only if the object really is in the array: on a
+    // foreign pointer get_full_name would take the process down.
+    if (name.empty() && index >= 0) try {
+        name = utility::narrow(((sdk::UObject*)component)->get_full_name());
+    } catch (...) {
+        name.clear();
+    }
+
+    if (name.empty()) {
+        name = "<unknown name>";
+    }
+
+    // hooked=false means the state was created before the backfill: the object set is
+    // still empty, so tracked is inevitably false and no creation was actually missed.
+    SPDLOG_WARN("[UObjectHook] motion controller state: component 0x{:x} tracked={} hooked={} tracked_total={} guobjectarray_index={} {}",
+        (uintptr_t)component, tracked, m_fully_hooked, tracked_total, index, name);
+}
+
+void UObjectHook::on_uobject_created(void* object) {
+    if (object == nullptr) {
+        return;
+    }
+
+    auto& hook = UObjectHook::get();
+
+    ++hook->m_debug.listener_notifications;
+
+    // By this point the object is already registered in the array and its name and
+    // class are set: in the disassembled code the dispatch happens AFTER the writes to
+    // item->Object and this->InternalIndex.
+    hook->add_new_object((sdk::UObjectBase*)object);
+}
+
+void UObjectHook::on_uobject_array_shutdown_impl() {
+    // Put the listener array back the way we found it, so that on shutdown the engine
+    // does not try to free our buffer with its own allocator.
+    UObjectHook::get()->unregister_create_listener();
+    UObjectHook::get()->unride_delete_listener();
+}
+
+void UObjectHook::CreateListenerWithDtor::notify_uobject_created(void* object, int32_t index) {
+    UObjectHook::on_uobject_created(object);
+}
+
+void UObjectHook::CreateListenerWithDtor::on_uobject_array_shutdown() {
+    UObjectHook::on_uobject_array_shutdown_impl();
+}
+
+void UObjectHook::CreateListenerNoDtor::notify_uobject_created(void* object, int32_t index) {
+    UObjectHook::on_uobject_created(object);
+}
+
+void UObjectHook::CreateListenerNoDtor::on_uobject_array_shutdown() {
+    UObjectHook::on_uobject_array_shutdown_impl();
+}
+
+bool UObjectHook::derive_create_listener_layout() {
+    if (m_create_listener_layout_known) {
+        return true;
+    }
+
+    const auto gua = (uintptr_t)sdk::FUObjectArray::get();
+
+    if (gua == 0) {
+        SPDLOG_ERROR("[UObjectHook] FUObjectArray is unknown, cannot derive the dispatch layout");
+        return false;
+    }
+
+    const auto module_base = (uintptr_t)utility::get_executable();
+
+    if (module_base == 0) {
+        return false;
+    }
+
+    // Bounds of the executable section: there is no point searching data, and it cuts
+    // the volume to a third.
+    const auto dos = (PIMAGE_DOS_HEADER)module_base;
+    const auto nt = (PIMAGE_NT_HEADERS)(module_base + dos->e_lfanew);
+    const auto sections = IMAGE_FIRST_SECTION(nt);
+
+    uintptr_t text_start = 0;
+    size_t text_size = 0;
+
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if ((sections[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) {
+            text_start = module_base + sections[i].VirtualAddress;
+            text_size = sections[i].Misc.VirtualSize;
+            break;
+        }
+    }
+
+    if (text_start == 0 || text_size < 0x1000) {
+        SPDLOG_ERROR("[UObjectHook] could not find an executable section");
+        return false;
+    }
+
+    // The range of fields where the listener arrays can live in any UE version.
+    // The lower bound deliberately excludes the hot fields: there are nearly 49k
+    // references to ObjObjects (GUObjectArray+0x10) in this module, and they would turn
+    // the search into a walk over half the code. The listener arrays always come after
+    // ObjObjects, the critical section and ObjAvailableList, so no closer than ~0x50.
+    constexpr uint32_t FIELD_LO = 0x40;
+    constexpr uint32_t FIELD_HI = 0x200;
+
+    // A suitable instruction length exists iff:
+    //     target = pos + 4 + tail + disp,  tail in [0..7]
+    // so it is enough to test whether (pos + 4 + disp) lands inside the range. No need
+    // to try all eight tail lengths -- one comparison per position.
+    std::vector<uintptr_t> candidates{};
+
+    for (size_t i = 0; i + 8 < text_size; ++i) {
+        const auto pos = text_start + i;
+        const auto disp = *(int32_t*)pos;
+        const auto v = (uintptr_t)((intptr_t)pos + 4 + (intptr_t)disp);
+
+        if (v + 7 >= gua + FIELD_LO && v < gua + FIELD_HI) {
+            candidates.push_back(pos);
+
+            if (candidates.size() > 4096) {
+                break;
+            }
+        }
+    }
+
+    SPDLOG_INFO("[UObjectHook] candidate references to FUObjectArray fields: {}", candidates.size());
+
+    uint32_t best_field = 0;
+    uint32_t best_slot = 0;
+    uintptr_t best_site = 0;
+    bool found_any = false;
+
+    // Every dispatch loop found, kept for the delete listeners' one (below).
+    struct Dispatch {
+        uint32_t field;
+        uint32_t slot;
+    };
+
+    std::vector<Dispatch> dispatches{};
+
+    // The three instructions of the dispatch loop sit back to back in one basic block,
+    // so there is no need to follow branches -- a linear decode forward is enough.
+    for (const auto cand : candidates) {
+        // Find the instruction start: the displacement occupies the last 4 bytes before
+        // any immediate operand, so step backwards and verify that the decoded
+        // instruction really does reference a field of the array.
+        uintptr_t ins_start = 0;
+        uintptr_t data_field = 0;
+
+        for (int back = 2; back <= 10 && ins_start == 0; ++back) {
+            const auto start = cand - back;
+            const auto decoded = utility::decode_one((uint8_t*)start);
+
+            if (!decoded.has_value() || decoded->Length < (uint32_t)back) {
+                continue;
+            }
+
+            if (auto t = utility::resolve_displacement(start, &*decoded); t.has_value()) {
+                if (*t >= gua + FIELD_LO && *t < gua + FIELD_HI) {
+                    ins_start = start;
+                    data_field = *t;
+                }
+            }
+        }
+
+        if (ins_start == 0) {
+            continue;
+        }
+
+        // Look for the triple: load Data -> indirect call through the vtable -> a read of
+        // Num, which must sit exactly 8 bytes past Data. That last part is what confirms
+        // this is a TArray and not an accidental address match.
+        //
+        // THE READ OF NUM IS ANY INSTRUCTION THAT TOUCHES Data+8, not a CMP against memory.
+        // Which instruction carries it is the compiler's choice, and demanding one shape
+        // rejects the same loop built the other way: Stalker 2 (UE 5.5.4) loads Num with
+        // `movsxd rax, dword [Num]` and then compares two registers, so the only reference
+        // to the field is in the load.
+        int32_t slot = -1;
+        auto ip = ins_start;
+
+        for (int n = 0; n < 16; ++n) {
+            const auto decoded = utility::decode_one((uint8_t*)ip);
+
+            if (!decoded.has_value()) {
+                break;
+            }
+
+            const std::string_view mnem{decoded->Mnemonic};
+
+            if (n > 0 && mnem.starts_with("CALL") && decoded->OperandsCount >= 1) {
+                const auto& op = decoded->Operands[0];
+
+                if (op.Type == ND_OP_MEM && op.Info.Memory.HasBase && !op.Info.Memory.IsRipRel) {
+                    slot = op.Info.Memory.HasDisp ? (int32_t)op.Info.Memory.Disp : 0;
+                }
+            }
+
+            if (n > 0 && slot >= 0) {
+                if (auto t = utility::resolve_displacement(ip, &*decoded); t.has_value() && *t == data_field + 0x8) {
+                    const auto field = (uint32_t)(data_field - gua);
+
+                    SPDLOG_INFO("[UObjectHook] listener dispatch at 0x{:x}: TArray at FUObjectArray+0x{:X}, notify at vtable +0x{:X} (slot {})",
+                        ins_start, field, (uint32_t)slot, slot / 8);
+
+                    dispatches.push_back({field, (uint32_t)slot});
+
+                    if (!found_any || field < best_field || (field == best_field && (uint32_t)slot < best_slot)) {
+                        found_any = true;
+                        best_field = field;
+                        best_slot = (uint32_t)slot;
+                        best_site = ins_start;
+                    }
+
+                    break;
+                }
+            }
+
+            ip += decoded->Length;
+        }
+    }
+
+    if (!found_any) {
+        SPDLOG_ERROR("[UObjectHook] could not identify the create listener dispatch");
+
+        return false;
+    }
+
+    // THE LOWEST FIELD, THEN THE LOWEST SLOT, and declaration order is the only thing that tells the
+    // matches apart. UObjectDeleteListeners is walked by an identical loop with the same (object, index)
+    // notify, but it is declared after the create listeners, so it sits at a higher offset. And the shutdown
+    // loop walks the create array too, calling OnUObjectArrayShutdown, which is declared after
+    // NotifyUObjectCreated and so sits at a higher slot. Taking whichever match comes first in the image
+    // subscribes to the wrong one, silently.
+    m_create_listeners_offset = best_field;
+    m_create_listener_notify_offset = best_slot;
+    m_create_listener_layout_known = true;
+
+    SPDLOG_WARN("[UObjectHook] found the create listener dispatch at 0x{:x}: UObjectCreateListeners at FUObjectArray+0x{:X}, NotifyUObjectCreated at vtable +0x{:X} (slot {})",
+        best_site, m_create_listeners_offset, m_create_listener_notify_offset, m_create_listener_notify_offset / 8);
+
+    // THE DELETE LISTENERS' ARRAY, told by the SHUTDOWN loop: FUObjectArray::ShutdownUObjectArray calls
+    // OnUObjectArrayShutdown -- the slot after Notify in both interfaces -- on the create listeners and then on the delete
+    // listeners, so the nearest array past the create listeners walked with that slot is the delete listeners'. Their
+    // own notify loop is not found by the search above (compiled in another shape). Measured on Stalker 2 (UE 5.5.4):
+    // shutdown loops on +0x68, +0x78 and +0x80; the delete listeners are +0x78 -- as The Outer Worlds 2's FUObjectArray
+    // read from live memory -- and +0x80, walked with the notify slot, held 0x200000002 / -1 / -1, no array at all.
+    // The rule is not universal: on Silent Hill 2 it picks +0xB8, Num 2091672816, which the check in ride_delete_listener
+    // refuses. Whatever is picked, that check reads the memory before a byte is written.
+    const auto shutdown_slot = best_slot + 0x8;
+
+    for (const auto& d : dispatches) {
+        if (d.field > best_field && d.slot == shutdown_slot && (m_delete_listeners_offset == 0 || d.field < m_delete_listeners_offset)) {
+            m_delete_listeners_offset = d.field;
+        }
+    }
+
+    if (m_delete_listeners_offset != 0) {
+        SPDLOG_WARN("[UObjectHook] UObjectDeleteListeners at FUObjectArray+0x{:X}, NotifyUObjectDeleted at vtable +0x{:X}",
+            m_delete_listeners_offset, best_slot);
+    } else {
+        SPDLOG_ERROR("[UObjectHook] no delete listener dispatch among {} dispatch loops", dispatches.size());
+    }
+
+    return true;
+}
+
+void UObjectHook::try_register_create_listener() {
+    if (m_create_listener_registered) {
+        return;
+    }
+
+    const auto arr = (uintptr_t)sdk::FUObjectArray::get();
+
+    if (arr == 0) {
+        SPDLOG_ERROR("[UObjectHook] FUObjectArray is unknown, the create listener was not registered");
+        return;
+    }
+
+    // The array offset and the vtable slot are derived from the dispatch code rather
+    // than hardcoded. That is what makes this portable: UE versions differ both in the
+    // FUObjectArray layout and in whether the listener interface has a virtual
+    // destructor.
+    if (!derive_create_listener_layout()) {
+        SPDLOG_ERROR("[UObjectHook] engine notification unavailable -- staying on the hook plus the catch-up sweep");
+        return;
+    }
+
+    auto offset = m_create_listeners_offset;
+    const auto notify_offset = m_create_listener_notify_offset;
+
+    // The override is kept so other builds can be probed without rebuilding UEVR.
+    char env[16]{};
+    if (GetEnvironmentVariableA("UEVR_CREATE_LISTENERS_OFFSET", env, sizeof(env)) > 0) {
+        offset = (uint32_t)strtoul(env, nullptr, 16);
+        SPDLOG_WARN("[UObjectHook] listener array offset overridden externally: 0x{:X}", offset);
+    }
+
+    // Exactly two vtable layouts are supported, and both occur in UE.
+    void* listener = nullptr;
+
+    if (notify_offset == 0x8) {
+        listener = &m_create_listener_with_dtor;
+    } else if (notify_offset == 0x0) {
+        listener = &m_create_listener_no_dtor;
+    } else {
+        SPDLOG_ERROR("[UObjectHook] NotifyUObjectCreated at an unknown offset +0x{:X}, subscription cancelled to avoid calling the wrong method",
+            notify_offset);
+        return;
+    }
+
+    const auto array_addr = arr + offset;
+
+    if (IsBadReadPtr((void*)array_addr, 0x10)) {
+        SPDLOG_ERROR("[UObjectHook] the listener TArray at 0x{:x} is not readable", array_addr);
+        return;
+    }
+
+    const auto data = *(void**)array_addr;
+    const auto num = *(int32_t*)(array_addr + 0x8);
+    const auto max = *(int32_t*)(array_addr + 0xC);
+
+    SPDLOG_WARN("[UObjectHook] UObjectCreateListeners at 0x{:x} (GUObjectArray+0x{:X}): Data=0x{:x} Num={} Max={}",
+        array_addr, offset, (uintptr_t)data, num, max);
+
+    // Sanity check: an empty TArray has a null pointer, a non-empty one has a readable
+    // pointer, and Num is never greater than Max. The engine only ever registers a
+    // couple of listeners, so a large Num would mean the offset is wrong.
+    const bool sane = num >= 0 && num <= 32 && max >= num &&
+                      (data == nullptr ? (num == 0 && max == 0) : !IsBadReadPtr(data, sizeof(void*)));
+
+    if (!sane) {
+        SPDLOG_ERROR("[UObjectHook] 0x{:X} does not look like the listener TArray, registration cancelled", offset);
+        return;
+    }
+
+    m_listeners_array = array_addr;
+    m_saved_listeners_data = data;
+    m_saved_listeners_num = num;
+    m_saved_listeners_max = max;
+
+    if (num > max || num >= LISTENER_SLOTS) {
+        SPDLOG_ERROR("[UObjectHook] there are already {} listeners, they do not fit in our buffer", num);
+        return;
+    }
+
+    // Copy the existing listeners into our buffer and append ourselves.
+    for (int32_t i = 0; i < num; ++i) {
+        m_listener_slots[i] = ((void**)data)[i];
+    }
+
+    m_listener_slots[num] = listener;
+
+    // Write order matters: pointer and capacity first, Num last. Otherwise the engine
+    // could observe the larger Num while the pointer is still the old one.
+    *(void**)m_listeners_array = m_listener_slots;
+    *(int32_t*)(m_listeners_array + 0xC) = LISTENER_SLOTS;
+    *(int32_t*)(m_listeners_array + 0x8) = num + 1;
+
+    m_create_listener_registered = true;
+
+    SPDLOG_WARN("[UObjectHook] registered our FUObjectCreateListener in array slot {}, Notify at +0x{:X}: notification is now native and complete",
+        num, notify_offset);
+}
+
+// The first listener of the engine's delete listeners' array, ridden: see ridden_notify. The array must read as one --
+// a few entries, each an object whose vtable lies in the game's image -- or nothing is written at all, and destructions
+// stay with the destructor hook.
+void UObjectHook::ride_delete_listener() {
+    if (m_ridden_listener != nullptr) {
+        return;
+    }
+
+    const auto gua = (uintptr_t)sdk::FUObjectArray::get();
+
+    if (gua == 0 || !derive_create_listener_layout() || m_delete_listeners_offset == 0) {
+        SPDLOG_ERROR("[UObjectHook] the delete listeners' array is unknown, destructions stay with the destructor hook");
+        return;
+    }
+
+    const auto array_addr = gua + m_delete_listeners_offset;
+
+    if (IsBadReadPtr((void*)array_addr, 0x10)) {
+        SPDLOG_ERROR("[UObjectHook] the delete listeners' TArray at 0x{:x} is not readable", array_addr);
+        return;
+    }
+
+    const auto data = *(void***)array_addr;
+    const auto num = *(int32_t*)(array_addr + 0x8);
+    const auto max = *(int32_t*)(array_addr + 0xC);
+
+    SPDLOG_WARN("[UObjectHook] UObjectDeleteListeners at GUObjectArray+0x{:X}: Data=0x{:x} Num={} Max={}",
+        m_delete_listeners_offset, (uintptr_t)data, num, max);
+
+    const auto module = (uintptr_t)utility::get_executable();
+    const auto module_size = utility::get_module_size((HMODULE)module).value_or(0);
+    bool sane = num >= 1 && num <= 64 && max >= num && data != nullptr && !IsBadReadPtr(data, num * sizeof(void*));
+
+    for (int32_t i = 0; sane && i < num; ++i) {
+        const auto vtable = (data[i] != nullptr && !IsBadReadPtr(data[i], sizeof(void*))) ? *(uintptr_t*)data[i] : 0;
+
+        sane = vtable >= module && vtable < module + module_size;
+    }
+
+    const auto listener = sane ? data[0] : nullptr;
+    const auto vtable = sane ? *(void***)listener : nullptr;
+
+    // The entry before the vtable is its RTTI locator, carried over so a dynamic_cast on the listener still works.
+    if (!sane || IsBadReadPtr(vtable - 1, (RIDE_VTABLE_ENTRIES + 1) * sizeof(void*))) {
+        SPDLOG_ERROR("[UObjectHook] GUObjectArray+0x{:X} does not look like the delete listeners' array, destructions stay with the destructor hook",
+            m_delete_listeners_offset);
+        return;
+    }
+
+    for (size_t e = 0; e <= RIDE_VTABLE_ENTRIES; ++e) {
+        m_ridden_vtable[e] = vtable[(int64_t)e - 1];
+    }
+
+    // NotifyUObjectDeleted sits in its interface where NotifyUObjectCreated sits in its own.
+    const auto notify_slot = 1 + m_create_listener_notify_offset / sizeof(void*);
+
+    m_ridden_original_vtable = vtable;
+    m_ridden_original_notify = m_ridden_vtable[notify_slot];
+    m_ridden_vtable[notify_slot] = (void*)&ridden_notify;
+    m_ridden_listener = listener;
+
+    // One pointer write, atomic on x64: the engine calls through either the old table or ours, never half of one.
+    *(void***)listener = &m_ridden_vtable[1];
+
+    SPDLOG_WARN("[UObjectHook] riding the engine's delete listener 0x{:x} (1 of {}): its notify now forgets the object, then runs as before",
+        (uintptr_t)listener, num);
+}
+
+// The listener's own vtable back, if it is still the one we rode.
+void UObjectHook::unride_delete_listener() {
+    if (m_ridden_listener == nullptr) {
+        return;
+    }
+
+    if (*(void***)m_ridden_listener == &m_ridden_vtable[1]) {
+        *(void***)m_ridden_listener = (void**)m_ridden_original_vtable;
+    }
+
+    m_ridden_listener = nullptr;
+}
+
+// Called by the engine while the object is still whole, before its index is given back: forgotten here, it is never
+// seen dead by anything of ours. Then the listener's own notify, as if nothing had happened.
+void UObjectHook::ridden_notify(void* self, const void* object, int32_t index) {
+    auto& hook = UObjectHook::get();
+
+    ++hook->m_debug.delete_notifications;
+
+    if (hook->forget_object((sdk::UObjectBase*)object)) {
+        ++hook->m_debug.delete_listener_removals;
+    }
+
+    ((void(*)(void*, const void*, int32_t))hook->m_ridden_original_notify)(self, object, index);
+}
+
+std::unordered_set<sdk::UObjectBase*> UObjectHook::get_objects_by_class(sdk::UClass* uclass) const {
+    std::unordered_set<sdk::UObjectBase*> result{};
+
+    {
+        std::shared_lock _{m_mutex};
+
+        if (auto it = m_objects_by_class.find(uclass); it != m_objects_by_class.end()) {
+            result = it->second;
+        }
+    }
+
+    std::erase_if(result, [this, uclass](sdk::UObjectBase* object) {
+        return uclass == nullptr || !is_object_live(object) || !((sdk::UObject*)object)->is_a(uclass);
+    });
+
+    return result;
+}
+
+bool UObjectHook::is_object_live(sdk::UObjectBase* object) const {
+    if (object == nullptr) {
+        return false;
+    }
+
+    const auto arr = sdk::FUObjectArray::get();
+
+    if (arr == nullptr) {
+        // Nothing to ask, so nothing is claimed: the caller keeps whatever guarantees it had before.
+        return true;
+    }
+
+    uint32_t index = 0;
+
+    {
+        std::shared_lock _{m_mutex};
+
+        const auto it = m_meta_objects.find(object);
+
+        if (it == m_meta_objects.end()) {
+            return false;
+        }
+
+        index = it->second->internal_index;
+    }
+
+    // get_object checks only for a negative index; anything past the end reads outside the array.
+    if ((int32_t)index < 0 || (int32_t)index >= arr->get_object_count()) {
+        return false;
+    }
+
+    const auto item = arr->get_object((int32_t)index);
+
+    // The slot is reused by the next object that takes this index, so the pointer has to match as well.
+    if (item == nullptr || (sdk::UObjectBase*)item->object != object) {
+        return false;
+    }
+
+    // STILL IN THE ARRAY IS NOT STILL USABLE: see DYING_FLAGS. The object's own flags are readable here -- its memory is
+    // not freed while the array still holds it.
+    const auto flags = *(uint32_t*)((uintptr_t)object + sdk::UObjectBase::get_object_flags_offset());
+
+    return (flags & DYING_FLAGS) == 0;
+}
+
+// An object we may not track at all (a component's owner): gone from its slot in the array, or flagged as dying. Reads
+// the object, so only for one whose memory is known to be held -- the outer of a live object.
+bool UObjectHook::is_dying(sdk::UObjectBase* object) const {
+    const auto arr = sdk::FUObjectArray::get();
+
+    if (arr == nullptr || object == nullptr) {
+        return false;
+    }
+
+    const auto index = (int32_t)object->get_internal_index();
+
+    if (index < 0 || index >= arr->get_object_count()) {
+        return true;
+    }
+
+    const auto item = arr->get_object(index);
+
+    if (item == nullptr || (sdk::UObjectBase*)item->object != object) {
+        return true;
+    }
+
+    const auto flags = *(uint32_t*)((uintptr_t)object + sdk::UObjectBase::get_object_flags_offset());
+
+    return (flags & DYING_FLAGS) != 0;
+}
+
+void UObjectHook::unregister_create_listener() {
+    if (!m_create_listener_registered || m_listeners_array == 0) {
+        return;
+    }
+
+    // Zero Num first, so the engine stops walking our buffer, and only then restore
+    // the original pointer and capacity.
+    *(int32_t*)(m_listeners_array + 0x8) = m_saved_listeners_num;
+    *(void**)m_listeners_array = m_saved_listeners_data;
+    *(int32_t*)(m_listeners_array + 0xC) = m_saved_listeners_max;
+
+    m_create_listener_registered = false;
+
+    SPDLOG_WARN("[UObjectHook] our listener was removed, the array is back to its original state");
+}
+
+void UObjectHook::reconcile_with_uobjectarray() {
+    const auto arr = sdk::FUObjectArray::get();
+
+    if (arr == nullptr) {
+        return;
+    }
+
+    const auto count = arr->get_object_count();
+
+    if (count <= 0) {
+        return;
+    }
+
+    // How many entries to examine per frame, and how many objects to add at most.
+    // The check itself is a hash lookup and costs next to nothing, but add_new_object
+    // computes the object's full name, so additions get their own separate budget.
+    constexpr int32_t EXAMINE_BUDGET = 8192;
+    constexpr size_t ADD_BUDGET = 2048;
+
+    // The array may have shrunk (after unloading a level, for instance), in which case
+    // the tail pointer is meaningless and we start over.
+    if (m_reconcile_known_count > count) {
+        m_reconcile_known_count = 0;
+    }
+
+    std::vector<sdk::UObjectBase*> missing{};
+
+    // NOT WITH THE CREATE LISTENER REGISTERED: it hears every creation, so there is nothing to catch up on -- and with
+    // the delete listener standing too, this sweep did harm. An object is forgotten when the engine announces its
+    // deletion, while it still sits in the array for a moment, half torn down; the sweep took it for a missed creation,
+    // added it back and read its name: The Outer Worlds 2 crashed there on a level load (add_new_object ->
+    // get_full_name -> FName::to_string, inside the game).
+    if (!m_create_listener_registered) {
+        std::shared_lock _{m_mutex};
+
+        auto consider = [&](int32_t i) {
+            const auto item = arr->get_object(i);
+
+            if (item == nullptr || item->object == nullptr) {
+                return;
+            }
+
+            // Being destroyed is not being missed. Its memory is still the object's while the array holds it.
+            const auto flags = *(uint32_t*)((uintptr_t)item->object + sdk::UObjectBase::get_object_flags_offset());
+
+            if ((flags & DYING_FLAGS) != 0) {
+                return;
+            }
+
+            if (!exists_unsafe(item->object)) {
+                missing.push_back(item->object);
+            }
+        };
+
+        int32_t budget = EXAMINE_BUDGET;
+
+        // 1. The tail: freshly created objects are appended here.
+        while (m_reconcile_known_count < count && budget > 0 && missing.size() < ADD_BUDGET) {
+            consider(m_reconcile_known_count++);
+            --budget;
+        }
+
+        // 2. Ring sweep over the rest of the array -- catches reused slots.
+        while (budget > 0 && missing.size() < ADD_BUDGET) {
+            if (m_reconcile_cursor >= count) {
+                m_reconcile_cursor = 0;
+            }
+
+            consider(m_reconcile_cursor++);
+            --budget;
+        }
+    }
+
+    // add_new_object takes a unique_lock itself, so call it outside the shared_lock.
+    for (const auto obj : missing) {
+        add_new_object(obj);
+    }
+
+    m_debug.reconciled_objects += missing.size();
+}
+
 void UObjectHook::add_new_object(sdk::UObjectBase* object) {
     std::unique_lock _{m_mutex};
     std::unique_ptr<MetaObject> meta_object{};
@@ -434,6 +1154,12 @@ void UObjectHook::add_new_object(sdk::UObjectBase* object) {
     const auto c = object->get_class();
 
     if (c == nullptr) {
+        // Count the rejections. An object whose ClassPrivate is not set yet never makes
+        // it into the set, so it stays invisible to exists() and therefore to
+        // attachments. If this counter grows noticeably, processing has to move to a
+        // later point, once the class has been written.
+        // The mutex is already held at the top of add_new_object.
+        ++m_debug.null_class_rejects;
         return;
     }
 
@@ -449,6 +1175,7 @@ void UObjectHook::add_new_object(sdk::UObjectBase* object) {
     meta_object->super_classes.clear();
     meta_object->full_name = object->get_full_name();
     meta_object->uclass = object->get_class();
+    meta_object->internal_index = object->get_internal_index(); // read while certainly alive -- see is_object_live
 
     m_most_recent_objects.push_front((sdk::UObject*)object);
 
@@ -531,6 +1258,11 @@ void UObjectHook::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
                 }
             }
         }
+
+        // Catch up on objects created behind the hook's back. Without this, components
+        // created after loading a save fail exists(), and motion controller attachments
+        // silently stop being applied.
+        reconcile_with_uobjectarray();
 
         update_persistent_states();
     }
@@ -681,6 +1413,7 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
     const auto adjusted_world_to_meters = world_to_meters * vr->get_world_scale();
 
     const auto view_quat_inverse_flat = utility::math::flatten(view_quat_inverse);
+
     const auto offset1 = quat_converter * (glm::normalize(view_quat_inverse_flat) * (pos * adjusted_world_to_meters));
 
     glm::vec3 final_position{};
@@ -903,7 +1636,23 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
         if (!this->exists(comp) || it.second == nullptr) {
             continue;
         }
-        
+
+        // A save load frees the attached weapon, and this runs on the very next frame -- see is_object_live.
+        if (!this->is_object_live(comp)) {
+            ++m_debug.stale_objects_skipped;
+            continue;
+        }
+
+        // ITS OWNER TOO. A save load crashed here on a component that passed the check above -- in the array, not flagged
+        // -- reading 0x10000001f inside SetWorldLocation: what it hangs on was going. The owner's memory is safe to read
+        // while the component lives, the collector keeps an outer alive with its inners.
+        const auto outer = comp->get_outer();
+
+        if (outer != nullptr && is_dying(outer)) {
+            ++m_debug.stale_objects_skipped;
+            continue;
+        }
+
         auto& state = *it.second;
         const auto orig_position = comp->get_world_location();
         const auto orig_rotation = comp->get_world_rotation();
@@ -1682,6 +2431,12 @@ void UObjectHook::update_motion_controller_components(
             continue;
         }
 
+        // Before the first read of the component: get_outer on a freed one is a crash -- see is_object_live.
+        if (!this->is_object_live(mc)) {
+            ++m_debug.stale_objects_skipped;
+            continue;
+        }
+
         if (mc->get_outer() == nullptr || !this->exists(mc->get_outer())) {
             continue;
         }
@@ -2094,6 +2849,37 @@ void UObjectHook::draw_developer() {
         // uint64_t
         ImGui::Text("Constructor calls: %llu", m_debug.constructor_calls);
         ImGui::Text("Destructor calls: %llu", m_debug.destructor_calls);
+
+        // Coverage diagnostics.
+        // If AddObject is inlined, the UObjectBase constructor may be inlined into some
+        // of its callers too, in which case not every creation is caught. The tell-tale
+        // sign is "Tracked objects" steadily dropping while "Untracked destructions"
+        // climbs: an object was destroyed whose creation we never saw.
+        ImGui::Text("Tracked objects: %llu", (uint64_t)m_objects.size());
+        ImGui::Text("Untracked destructions: %llu", m_debug.untracked_destructions);
+        ImGui::Text("Null-class rejects: %llu", m_debug.null_class_rejects);
+        ImGui::Text("Reconciled objects: %llu", m_debug.reconciled_objects);
+        ImGui::Text("Listener notifications: %llu", m_debug.listener_notifications);
+        ImGui::Text("Create listener: %s", m_create_listener_registered ? "registered" : "no");
+        ImGui::Text("Stale objects skipped: %llu", m_debug.stale_objects_skipped);
+        ImGui::Text("Delete listener: %s, %llu notified (%llu of ours removed)",
+            m_ridden_listener != nullptr ? "riding the engine's" : "no",
+            m_debug.delete_notifications, m_debug.delete_listener_removals);
+
+        // The gap between the engine array and our set. Normally it should sit near
+        // zero; a persistently large value means creation coverage is incomplete.
+        // Note it also counts holes left by destroyed objects, so treat it as an
+        // indicator rather than an exact number of misses.
+        if (const auto arr = sdk::FUObjectArray::get(); arr != nullptr) {
+            const auto engine_count = (int64_t)arr->get_object_count();
+            ImGui::Text("Engine array: %lld (gap: %lld)", engine_count, engine_count - (int64_t)m_objects.size());
+        }
+
+        const auto ctor = m_debug.constructor_calls;
+        const auto dtor = m_debug.destructor_calls;
+        if (dtor > 0) {
+            ImGui::Text("ctor/dtor ratio: %.3f", (double)ctor / (double)dtor);
+        }
 
         ImGui::TreePop();
     }
@@ -4058,8 +4844,27 @@ void* UObjectHook::add_object(void* rcx, void* rdx, void* r8, void* r9, void* st
     auto& hook = UObjectHook::get();
     auto result = hook->m_add_object_hook.unsafe_call<void*>(rcx, rdx, r8, r9, stack1, stack2, stack3, stack4);
 
+    // If the engine notification subscription succeeded, there is nothing to process
+    // here: everything arrives through FUObjectCreateListener, and it arrives complete
+    // rather than only along the paths where the constructor was not inlined. The hook
+    // itself stays installed as a fallback: remove the subscription and processing
+    // resumes from here.
+    if (hook->m_create_listener_registered) {
+        ++hook->m_debug.constructor_calls;
+        return result;
+    }
+
     {
         static bool is_rcx = [&]() {
+            // NOTE. The heuristic below requires rcx to survive three dereferences,
+            // i.e. the object must already have a valid vtable. But AddObject is called
+            // FROM THE CONSTRUCTOR, before the vtable is written, so the check fails and
+            // RDX gets picked instead -- and RDX holds an FName by value, not a pointer.
+            // What follows is a dereference of garbage, which is what crashed
+            // The Outer Worlds 2 (UE 5.6).
+            //
+            // This path is now a FALLBACK: it only runs when subscribing to
+            // FUObjectCreateListener failed. The primary path never reaches it.
             if (!IsBadReadPtr(rcx, sizeof(void*)) && 
                 !IsBadReadPtr(*(void**)rcx, sizeof(void*)) &&
                 !IsBadReadPtr(**(void***)rcx, sizeof(void*))) 
@@ -4080,6 +4885,7 @@ void* UObjectHook::add_object(void* rcx, void* rdx, void* r8, void* r9, void* st
             obj = (sdk::UObjectBase*)rdx;
         }
 
+
         ++hook->m_debug.constructor_calls;
         hook->add_new_object(obj);
     }
@@ -4090,12 +4896,29 @@ void* UObjectHook::add_object(void* rcx, void* rdx, void* r8, void* r9, void* st
 void* UObjectHook::destructor(sdk::UObjectBase* object, void* rdx, void* r8, void* r9) {
     auto& hook = UObjectHook::get();
 
+    if (hook->forget_object(object)) {
+        ++hook->m_debug.destructor_calls;
+    } else if (hook->m_fully_hooked) {
+        // An object is being destroyed whose creation we never saw.
+        // This is a direct measure of coverage: if AddObject is inlined, the
+        // UObjectBase constructor may be inlined into some callers as well, and then
+        // part of the creations bypass the hook. Steady growth of this counter is
+        // exactly that situation.
+        // Only objects created AFTER the backfill are counted: before it the set is
+        // empty, so every destruction would look like a miss.
+        ++hook->m_debug.untracked_destructions;
+    }
+
+    return hook->m_destructor_hook.unsafe_call<void*>(object, rdx, r8, r9);
+}
+
+bool UObjectHook::forget_object(sdk::UObjectBase* object) {
+    const auto hook = this;
+
     {
         std::unique_lock _{hook->m_mutex};
 
         if (auto it = hook->m_meta_objects.find(object); it != hook->m_meta_objects.end()) {
-            ++hook->m_debug.destructor_calls;
-
 #ifdef VERBOSE_UOBJECTHOOK
             SPDLOG_INFO("Removing object {:x} {:s}", (uintptr_t)object, utility::narrow(it->second->full_name));
 #endif
@@ -4135,12 +4958,12 @@ void* UObjectHook::destructor(sdk::UObjectBase* object, void* rdx, void* r8, voi
 
             hook->m_reusable_meta_objects.push_back(std::move(it->second));
             hook->m_meta_objects.erase(object);
+
+            return true;
         }
     }
 
-    auto result = hook->m_destructor_hook.unsafe_call<void*>(object, rdx, r8, r9);
-
-    return result;
+    return false;
 }
 
 void UObjectHook::PersistentProperties::save_to_file(std::optional<std::filesystem::path> path) try {
