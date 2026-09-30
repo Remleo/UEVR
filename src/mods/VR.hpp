@@ -602,6 +602,10 @@ public:
         return m_native_stereo_fix_same_pass->value();
     }
 
+    bool is_native_stereo_fix_share_distance_field_enabled() const {
+        return m_native_stereo_fix_share_distance_field->value();
+    }
+
     // Called when the game's frame number exceeds the highest seen, which is the only reliable sign of a
     // new frame. Why the highest and not the previous one: begin_render_viewfamily.
     void notify_game_frame_advanced() {
@@ -1109,6 +1113,7 @@ private:
     const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), false) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), false) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
+    const ModToggle::Ptr m_native_stereo_fix_share_distance_field{ ModToggle::create(generate_name("NativeStereoFixShareDistanceField"), false) };
 
     const ModSlider::Ptr m_custom_z_near{ ModSlider::create(generate_name("CustomZNear"), 0.001f, 100.0f, 0.01f, true) };
     const ModToggle::Ptr m_custom_z_near_enabled{ ModToggle::create(generate_name("EnableCustomZNear"), false, true) };
@@ -1236,6 +1241,7 @@ public:
             *m_ghosting_fix,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,
+            *m_native_stereo_fix_share_distance_field,
             *m_splitscreen_compatibility_mode,
             *m_splitscreen_view_index,
             *m_compatibility_skip_pip,

@@ -57,6 +57,7 @@
 #include "../../utility/Logging.hpp"
 
 #include "FFakeStereoRenderingHook.hpp"
+#include "SharedDistanceField.hpp"
 
 #include <tracy/Tracy.hpp>
 
@@ -3200,6 +3201,10 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
     auto result = g_hook->m_sceneview_data.constructor_hook.unsafe_call<sdk::FSceneView*>(view, init_options, a3, a4);
 
+    if (vr->is_native_stereo_fix_enabled()) {
+        SharedDistanceField::on_view_constructed(view, init_options->get_scene_state(), true_index);
+    }
+
     // Reset the view count back to what it was.
     if (views_original_count.has_value()) {
         auto view_family = init_options->get_view_family();
@@ -3790,6 +3795,10 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
     if (vr->is_stereo_emulation_enabled()) {
         return;
     }
+
+    // Before the family renders, so the renderer updates the field once and hands it to both views.
+    SharedDistanceField::on_pre_render(view_family,
+        vr->is_native_stereo_fix_enabled() && vr->is_native_stereo_fix_share_distance_field_enabled());
 
     const auto frame_count = *(uint32_t*)((uintptr_t)&view_family + SceneViewExtensionAnalyzer::frame_count_offset);
     static uint32_t last_frame = 0;

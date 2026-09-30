@@ -2713,6 +2713,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         if (ImGui::TreeNode("Native Stereo Fix")) {
             m_native_stereo_fix->draw("Enabled");
             m_native_stereo_fix_same_pass->draw("Use Same Stereo Pass");
+            m_native_stereo_fix_share_distance_field->draw("Share Distance Field Between Eyes");
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Both eyes use the left eye's global distance field.\n"
+                                  "Fixes Lumen lighting that differs between the eyes at a distance.");
+            }
             ImGui::TreePop();
         }
 
