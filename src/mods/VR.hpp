@@ -712,6 +712,23 @@ public:
         return m_decoupled_pitch_data.pre_flattened_rotation;
     }
 
+    // The panel's Freeze Position / Freeze Rotation, for a caller that knows when the game's camera must stop leading
+    // the view -- a scripted scene swinging the head the camera hangs on. A freeze asked for while one is on keeps the
+    // value it took, so asking every frame is harmless; the value is taken at the next view, as the panel's is.
+    void set_camera_freeze(bool position, bool rotation) {
+        const auto apply = [](bool want, bool& wants_freeze, bool& frozen) {
+            if (!want) {
+                wants_freeze = false;
+                frozen = false;
+            } else if (!frozen) {
+                wants_freeze = true;
+            }
+        };
+
+        apply(position, m_camera_freeze.position_wants_freeze, m_camera_freeze.position_frozen);
+        apply(rotation, m_camera_freeze.rotation_wants_freeze, m_camera_freeze.rotation_frozen);
+    }
+
     bool is_using_2d_screen() const {
         return m_2d_screen_mode->value();
     }

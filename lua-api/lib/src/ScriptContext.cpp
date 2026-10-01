@@ -483,6 +483,8 @@ int ScriptContext::setup_bindings() {
         // script can agree with what the player SEES instead of rebuilding placements the VR mod already made.
         "get_ui_quad_pose", &UEVR_VRData::get_ui_quad_pose,
         "get_smoothed_aim_rotation", &UEVR_VRData::get_smoothed_aim_rotation,
+        // The panel's camera freeze, for a script that knows when a scripted scene swings the game's head.
+        "set_camera_freeze", &UEVR_VRData::set_camera_freeze,
         "get_transform", &UEVR_VRData::get_transform,
         "get_eye_offset", &UEVR_VRData::get_eye_offset,
         "get_ue_projection_matrix", &UEVR_VRData::get_ue_projection_matrix,

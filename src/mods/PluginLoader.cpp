@@ -1395,6 +1395,10 @@ void set_decoupled_pitch_enabled(bool enabled) {
     VR::get()->set_decoupled_pitch(enabled);
 }
 
+void set_camera_freeze(bool position, bool rotation) {
+    VR::get()->set_camera_freeze(position, rotation);
+}
+
 // TODO: Optimize this with a map
 void set_mod_value(const char* key, const char* value) {
     if (key == nullptr || value == nullptr) {
@@ -1588,6 +1592,7 @@ UEVR_VRData g_vr_data {
     .set_flat_window_size = uevr::vr::set_flat_window_size,
     .get_ui_quad_pose = uevr::vr::get_ui_quad_pose,
     .get_smoothed_aim_rotation = uevr::vr::get_smoothed_aim_rotation,
+    .set_camera_freeze = uevr::vr::set_camera_freeze,
 };
 
 

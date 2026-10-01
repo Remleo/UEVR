@@ -701,6 +701,19 @@ typedef struct {
        Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
        plugins built against an older header. */
     bool (*get_smoothed_aim_rotation)(UEVR_Quaternionf* out_rotation);
+
+    /* Freeze the game camera's position and/or rotation where they are now, or let them go: the panel's Freeze
+       Position and Freeze Rotation under Camera. A freeze asked for while one is on keeps the value it took, so a
+       caller may ask every frame; the value is taken at the next view.
+
+       WHY A SCRIPT NEEDS IT. In a scripted scene the game animates the head its camera hangs on, and in a headset that
+       sway is the player's own view being turned for them. Decoupled pitch removes only the pitch, and the camera lerp
+       smooths the sway but still carries it through; only a freeze stops it. When a scene begins and ends is the
+       game's knowledge, which a script can read and the VR mod cannot.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    void (*set_camera_freeze)(bool position, bool rotation);
 } UEVR_VRData;
 
 struct lua_State;
