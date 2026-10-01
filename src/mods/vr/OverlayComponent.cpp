@@ -12,6 +12,38 @@ void OverlayComponent::on_reset() {
     m_overlay_data = {};
 }
 
+// The head's pose in the stage is the OpenXR view space located in it -- the space a head locked quad is submitted in,
+// so a plane placed from the kept pose lands where the head locked one stood at that moment.
+void OverlayComponent::set_plane_held(size_t plane, bool held) {
+    if (plane >= PLANE_COUNT) {
+        return;
+    }
+
+    auto& vr = VR::get();
+    std::scoped_lock _{m_held_mtx};
+
+    if (!held) {
+        m_held_head[plane].reset();
+        return;
+    }
+
+    if (m_held_head[plane].has_value() || !vr->get_runtime()->is_openxr()) {
+        return;
+    }
+
+    m_held_head[plane] = vr->get_transform(0);
+}
+
+std::optional<glm::mat4> OverlayComponent::get_held_head(size_t plane) const {
+    if (plane >= PLANE_COUNT) {
+        return std::nullopt;
+    }
+
+    std::scoped_lock _{m_held_mtx};
+
+    return m_held_head[plane];
+}
+
 std::optional<std::string> OverlayComponent::on_initialize_openvr() {
     m_overlay_data = {};
 
@@ -857,14 +889,21 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     layer.subImage.imageRect.extent.height = (int32_t)rect_h;
 
     auto glm_matrix = glm::identity<glm::mat4>();
+    const auto held = m_parent->get_held_head(plane);
 
+    // Held first: a script asked for the plane to stay where it hung on the headset (set_plane_held), and that
+    // overrides both the binding and the aim.
+    //
     // Head locked while the view follows the aim, whatever the setting says.
     //
     // The other branch anchors the quad in the stage through the rotation offset, which is taken once when
     // the aim takes over. Head movement then leaves the quad facing where the head used to be while the
     // picture stays with the aim, and the reticle the game draws into this UI slides off the middle of the
     // screen -- off the point the shot goes to.
-    if (vr->m_overlay_component.m_ui_follows_view[plane]->value() || vr->is_view_following_aim()) {
+    if (held.has_value()) {
+        glm_matrix = *held;
+        layer.space = vr->m_openxr->stage_space;
+    } else if (vr->m_overlay_component.m_ui_follows_view[plane]->value() || vr->is_view_following_aim()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());
@@ -904,11 +943,12 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     // draws away from its own middle still lands short, by the ratio between the layer and the game's field
     // of view -- that needs the layer sized to the game, which is a separate matter.
     //
-    // Only for the layer anchored in the stage. Head locked, its middle is already the middle of the
-    // picture; the offsets below are the player's placement, and scaling them would just drag the UI around.
+    // Only for the layer anchored in the stage through the rotation offset. Head locked, its middle is already the
+    // middle of the picture; the offsets below are the player's placement, and scaling them would just drag the UI
+    // around. Held, it is meant to stay put.
     const auto zoom = vr->get_zoom_factor();
 
-    if (zoom > 1.0f && layer.space == vr->m_openxr->stage_space) {
+    if (zoom > 1.0f && layer.space == vr->m_openxr->stage_space && !held.has_value()) {
         // Two frames are in play. The compositor will place this layer against the head, so the result has
         // to be expressed there; the picture inside it was rendered for the view rotation, so that is what
         // the offset is measured against. With the head still the two are the same rotation; once it turns,

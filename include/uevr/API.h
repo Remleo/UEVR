@@ -714,6 +714,22 @@ typedef struct {
        Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
        plugins built against an older header. */
     void (*set_camera_freeze)(bool position, bool rotation);
+
+    /* Hold a UI plane where it hangs on the headset right now, or let it go. Plane 0 is the interface the game
+       draws, plane 1 the one a script feeds. Held, the plane stands in the stage exactly as it stood on the head at
+       that moment -- place, turn, tilt and roll -- and still takes its distance, size and offsets, so a script can
+       change those while it is held. A hold asked for while one is on keeps the pose it took.
+
+       WHY NOTHING ELSE DOES IT. A plane that does not follow the view is anchored through the rotation offset, which
+       a recentre flattens to the head's yaw, and tilted only by the game camera's pitch; a head's roll has no way in
+       at all, and putting it into the rotation offset would roll the rendered world with it. So a menu brought up
+       with the head tilted came up tilted on the head and then snapped level.
+
+       OpenXR's quad only: under OpenVR, or with the interface drawn as a cylinder, the request is ignored.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    void (*set_ui_plane_held)(unsigned int plane, bool held);
 } UEVR_VRData;
 
 struct lua_State;

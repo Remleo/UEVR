@@ -3,6 +3,8 @@
 #include <string>
 #include <optional>
 #include <cstdint>
+#include <array>
+#include <mutex>
 
 #include "Mod.hpp"
 
@@ -71,8 +73,19 @@ public:
         return m_last_quad_pose[plane < PLANE_COUNT ? plane : 0];
     }
 
+    // A HELD plane stands in the stage exactly where it hung on the headset when the hold began: the head's pose at
+    // that moment is kept, and the plane is placed from it as the head locked one is placed from the head -- same
+    // distance, size and offsets, and every turn and tilt, roll included. A hold asked for while one is on keeps the
+    // pose it took. OpenXR's quad path only; elsewhere the request is ignored.
+    void set_plane_held(size_t plane, bool held);
+    std::optional<glm::mat4> get_held_head(size_t plane) const;
+
 private:
     std::array<QuadPose, PLANE_COUNT> m_last_quad_pose{};
+
+    // Written by a script's thread, read where the layers are made.
+    mutable std::mutex m_held_mtx{};
+    std::array<std::optional<glm::mat4>, PLANE_COUNT> m_held_head{};
 
     // Cached data for imgui VR overlay so we know when we need to update it
     // instead of doing it constantly every frame

@@ -1399,6 +1399,10 @@ void set_camera_freeze(bool position, bool rotation) {
     VR::get()->set_camera_freeze(position, rotation);
 }
 
+void set_ui_plane_held(unsigned int plane, bool held) {
+    VR::get()->get_overlay_component().set_plane_held((size_t)plane, held);
+}
+
 // TODO: Optimize this with a map
 void set_mod_value(const char* key, const char* value) {
     if (key == nullptr || value == nullptr) {
@@ -1593,6 +1597,7 @@ UEVR_VRData g_vr_data {
     .get_ui_quad_pose = uevr::vr::get_ui_quad_pose,
     .get_smoothed_aim_rotation = uevr::vr::get_smoothed_aim_rotation,
     .set_camera_freeze = uevr::vr::set_camera_freeze,
+    .set_ui_plane_held = uevr::vr::set_ui_plane_held,
 };
 
 
