@@ -212,6 +212,7 @@ Framework::Framework(HMODULE framework_module)
     // OUR OWN BASE, because a crash address means nothing without it. When the fault lands in this DLL the log
     // is all there is: subtract this from the address to get the RVA the PDB resolves.
     spdlog::info("UEVRBackend Addr: {:x}", (uintptr_t)GetModuleHandleW(L"UEVRBackend.dll"));
+    spdlog::info("Profile directory: {}", get_persistent_dir().string());
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -975,23 +976,50 @@ void Framework::on_direct_input_keys(const std::array<uint8_t, 256>& keys) {
     m_last_keys = keys;*/
 }
 
+std::filesystem::path Framework::get_global_dir() {
+    wchar_t app_data_path[MAX_PATH]{};
+    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+
+    return std::filesystem::path(app_data_path) / "UnrealVRMod";
+}
+
+std::filesystem::path Framework::get_local_dir() {
+    HMODULE self{};
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&Framework::get_local_dir, &self)) {
+        return {};
+    }
+
+    const auto self_path = utility::get_module_pathw(self);
+
+    if (!self_path) {
+        return {};
+    }
+
+    return std::filesystem::path(*self_path).parent_path() / "UnrealVRMod";
+}
+
 std::filesystem::path Framework::get_persistent_dir() {
-    auto return_appdata_dir = []() -> std::filesystem::path {
-        wchar_t app_data_path[MAX_PATH]{};
-        SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+    static const auto result = []() -> std::filesystem::path {
+        const auto exe_name = std::filesystem::path(*utility::get_module_pathw(utility::get_executable())).stem();
 
-        const auto exe_name = [&]() {
-            const auto result = std::filesystem::path(*utility::get_module_pathw(utility::get_executable())).stem().string();
-            const auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / result;
-            std::filesystem::create_directories(dir);
+        // A game's folder beside this DLL wins over the one in AppData, so UEVR and a profile can ship as one
+        // archive. Only if it exists: the AppData folder is created on demand and the local one never is, so a UEVR
+        // folder without one behaves as before.
+        if (const auto local_dir = get_local_dir(); !local_dir.empty()) {
+            std::error_code ec{};
 
-            return result;
-        }();
+            if (std::filesystem::is_directory(local_dir / exe_name, ec)) {
+                return local_dir / exe_name;
+            }
+        }
 
-        return std::filesystem::path(app_data_path) / "UnrealVRMod" / exe_name;
-    };
+        const auto dir = get_global_dir() / exe_name;
+        std::filesystem::create_directories(dir);
 
-    static const auto result = return_appdata_dir();
+        return dir;
+    }();
 
     return result;
 }

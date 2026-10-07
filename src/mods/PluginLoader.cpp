@@ -1832,7 +1832,7 @@ void PluginLoader::early_init() try {
     spdlog::info("[PluginLoader] Module path {}", utility::narrow(module_path));
 
     const auto plugin_path = Framework::get_persistent_dir() / "plugins";
-    const auto global_plugins_path = Framework::get_persistent_dir() / ".." / "UEVR" / "plugins";
+    const auto global_plugins_path = Framework::get_global_dir() / "UEVR" / "plugins";
     
     spdlog::info("[PluginLoader] Creating directories {}", plugin_path.string());
 

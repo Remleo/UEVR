@@ -120,7 +120,12 @@ public:
     void on_frontend_command(UEVRSharedMemory::Command command);
     void on_direct_input_keys(const std::array<uint8_t, 256>& keys);
 
+    // The game's profile: <local>\<exe> if that folder exists, else <global>\<exe>.
     static std::filesystem::path get_persistent_dir();
+    // %APPDATA%\UnrealVRMod, which also holds the UEVR folder shared by every game.
+    static std::filesystem::path get_global_dir();
+    // UnrealVRMod beside UEVRBackend.dll.
+    static std::filesystem::path get_local_dir();
     static std::filesystem::path get_persistent_dir(const std::string& dir) {
         return get_persistent_dir() / dir;
     }

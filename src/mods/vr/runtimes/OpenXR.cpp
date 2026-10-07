@@ -1086,7 +1086,7 @@ std::optional<std::string> OpenXR::initialize_actions(const std::string& json_st
 
         // If not, check for global profile in UEVR\Profiles dir
         if (!std::filesystem::exists(filename)) {
-            filename = (Framework::get_persistent_dir() / ".." / "UEVR" / "Profiles" / profile_file).string();
+            filename = (Framework::get_global_dir() / "UEVR" / "Profiles" / profile_file).string();
             spdlog::info("[VR] Setting bindings file to {}", filename);
         }
 

@@ -314,7 +314,7 @@ void LuaLoader::reset_scripts() {
     m_known_scripts.clear();
 
     const auto autorun_path = Framework::get_persistent_dir() / "scripts";
-    const auto global_autorun_path = Framework::get_persistent_dir()  / ".." / "UEVR" / "scripts";
+    const auto global_autorun_path = Framework::get_global_dir() / "UEVR" / "scripts";
 
     spdlog::info("[LuaLoader] Creating directories {}", autorun_path.string());
     std::filesystem::create_directories(autorun_path);
