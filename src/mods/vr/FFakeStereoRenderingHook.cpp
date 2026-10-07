@@ -5102,7 +5102,13 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         }
 
         if (!is_2d_screen) {
-            const auto euler = glm::degrees(utility::math::euler_angles_from_steamvr(new_rotation));
+            // A canted projection yaws the camera onto the middle of the eye's field (OpenXR.cpp); only the
+            // direction turns, the eye stays where eye_separation put it.
+            const auto canted_yaw = true_index < 2 ? vr->get_runtime()->canted_yaw[true_index] : 0.0f;
+            const auto view_rotation_eye = canted_yaw != 0.0f
+                ? glm::normalize(new_rotation * glm::angleAxis(canted_yaw, glm::vec3{0.0f, 1.0f, 0.0f}))
+                : new_rotation;
+            const auto euler = glm::degrees(utility::math::euler_angles_from_steamvr(view_rotation_eye));
 
             if (!has_double_precision) {
                 view_rotation->pitch = euler.x;

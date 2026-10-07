@@ -186,6 +186,12 @@ struct VRRuntime {
     // used to crop the rendered eye textures to account for projection adjustments
     float view_bounds[2][4] = {0, 1, 0, 1, 0, 1, 0, 1};
 
+    // Canted horizontal projection: each eye's camera is yawed by canted_yaw (radians, about the view's +Y, so
+    // positive turns it left) onto the middle of its own field of view, which is then symmetric, canted_half wide
+    // on each side. Derived with the projections; zero while the override is not canted.
+    float canted_yaw[2]{};
+    float canted_half[2]{};
+
     // True once when an override differs from what the projections were last derived with. A value written by a
     // script (set_mod_value) never passes the panel, the only other place that asks for a new derivation.
     bool projection_overrides_changed(int32_t horizontal, int32_t vertical, bool grow_rectangle) {
