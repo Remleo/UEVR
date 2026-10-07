@@ -576,6 +576,15 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         };
     };
 
+    {
+        const auto& vr = VR::get();
+
+        if (this->projection_overrides_changed(vr->get_horizontal_projection_override(), vr->get_vertical_projection_override(),
+                                               vr->should_grow_rectangle_for_projection_cropping())) {
+            this->should_recalculate_eye_projections = true;
+        }
+    }
+
     // if we've not yet derived an eye projection matrix, or we've changed the projection, derive it here
     // Hacky way to check for an uninitialised eye matrix - is there something better, is this necessary?
     if (this->should_recalculate_eye_projections || this->last_eye_matrix_nearz != nearz || this->projections[0][2][3] == 0) {
