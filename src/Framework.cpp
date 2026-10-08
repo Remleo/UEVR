@@ -1000,18 +1000,52 @@ std::filesystem::path Framework::get_local_dir() {
     return std::filesystem::path(*self_path).parent_path() / "UnrealVRMod";
 }
 
+// An Unreal exe is named <project>-<platform>-<configuration>, so one game ships as Game-Win64-Shipping on Steam and
+// as Game-WinGDK-Shipping on the Microsoft Store. Dropping these parts from the end, one at a time and only as whole
+// parts after a '-', gives the names one profile can serve every build under: the exe's own name first.
+static std::vector<std::wstring> get_profile_names(std::wstring name) {
+    static const wchar_t* well_known_parts[]{ L"Win64", L"WinGDK", L"Shipping", L"Test", L"Debug", L"DebugGame" };
+
+    std::vector<std::wstring> names{ name };
+
+    for (auto dash = name.rfind(L'-'); dash != std::wstring::npos && dash > 0; dash = name.rfind(L'-')) {
+        const auto part = name.substr(dash + 1);
+        bool known = false;
+
+        for (const auto well_known : well_known_parts) {
+            known = known || _wcsicmp(part.c_str(), well_known) == 0;
+        }
+
+        if (!known) {
+            break;
+        }
+
+        name.resize(dash);
+        names.push_back(name);
+    }
+
+    return names;
+}
+
 std::filesystem::path Framework::get_persistent_dir() {
     static const auto result = []() -> std::filesystem::path {
         const auto exe_name = std::filesystem::path(*utility::get_module_pathw(utility::get_executable())).stem();
+        const auto names = get_profile_names(exe_name.wstring());
 
-        // A game's folder beside this DLL wins over the one in AppData, so UEVR and a profile can ship as one
-        // archive. Only if it exists: the AppData folder is created on demand and the local one never is, so a UEVR
-        // folder without one behaves as before.
-        if (const auto local_dir = get_local_dir(); !local_dir.empty()) {
-            std::error_code ec{};
+        // The folder beside this DLL is searched under every name before AppData is, so UEVR and a profile can ship
+        // as one archive whatever an older session left in AppData. Only folders that exist count: nothing is
+        // created while a profile might still be found under a shorter name, and the local folder never is.
+        for (const auto& base_dir : { get_local_dir(), get_global_dir() }) {
+            if (base_dir.empty()) {
+                continue;
+            }
 
-            if (std::filesystem::is_directory(local_dir / exe_name, ec)) {
-                return local_dir / exe_name;
+            for (const auto& name : names) {
+                std::error_code ec{};
+
+                if (std::filesystem::is_directory(base_dir / name, ec)) {
+                    return base_dir / name;
+                }
             }
         }
 
