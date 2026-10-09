@@ -42,18 +42,20 @@ Newest first.
   flat window size, script reset from a key or a script.
 - **The log prints UEVRBackend's own address**, so a crash can be resolved against the `.pdb`.
 
-### Tested in games
+### Games fixed by this fork
 
-**STALKER 2** (Update 2, UE 5.5.4) — ✅ **Works. No more crashes.**
-The UI shows in the headset, weapons attached to the controllers work, and both eyes see the same lighting near and
-far.
+#### STALKER 2 (Update 2, UE 5.5.4)
+
+✅ **Works. No more crashes.** The UI shows in the headset, weapons attached to the controllers work, and both eyes
+see the same lighting near and far.
 
 > [!TIP]
 > **Ready to play: S.T.A.L.K.E.R. 2 in full VR.** UEVR by remleo with a full VR profile in one archive: unpack and
 > run. 👉 [Get it on Patreon](https://www.patreon.com/remleo/posts/s-t-l-k-e-r-2-in-171864844)
 
-**The Outer Worlds 2** — ✅ **Fixed.** No more weird glitch when you turn your head in a menu, and console commands
-work again.
+#### The Outer Worlds 2
+
+✅ **Fixed.** No more weird glitch when you turn your head in a menu, and console commands work again.
 
 ### Building and contributing
 
@@ -75,7 +77,10 @@ Universal Unreal Engine VR Mod (4/5)
 
 ## Supported Engine Versions
 
-4.8 - 5.5
+4.8 - 5.4
+
+> [!IMPORTANT]
+> **This fork (UEVR remleo Edition) extends support to Unreal Engine 5.5.** The range above is stock UEVR's.
 
 ## Links
 
