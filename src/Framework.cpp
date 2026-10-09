@@ -212,6 +212,7 @@ Framework::Framework(HMODULE framework_module)
     // OUR OWN BASE, because a crash address means nothing without it. When the fault lands in this DLL the log
     // is all there is: subtract this from the address to get the RVA the PDB resolves.
     spdlog::info("UEVRBackend Addr: {:x}", (uintptr_t)GetModuleHandleW(L"UEVRBackend.dll"));
+    spdlog::info("Profile directory: {}", get_persistent_dir().string());
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -975,23 +976,84 @@ void Framework::on_direct_input_keys(const std::array<uint8_t, 256>& keys) {
     m_last_keys = keys;*/
 }
 
+std::filesystem::path Framework::get_global_dir() {
+    wchar_t app_data_path[MAX_PATH]{};
+    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+
+    return std::filesystem::path(app_data_path) / "UnrealVRMod";
+}
+
+std::filesystem::path Framework::get_local_dir() {
+    HMODULE self{};
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&Framework::get_local_dir, &self)) {
+        return {};
+    }
+
+    const auto self_path = utility::get_module_pathw(self);
+
+    if (!self_path) {
+        return {};
+    }
+
+    return std::filesystem::path(*self_path).parent_path() / "UnrealVRMod";
+}
+
+// An Unreal exe is named <project>-<platform>-<configuration>, so one game ships as Game-Win64-Shipping on Steam and
+// as Game-WinGDK-Shipping on the Microsoft Store. Dropping these parts from the end, one at a time and only as whole
+// parts after a '-', gives the names one profile can serve every build under: the exe's own name first.
+static std::vector<std::wstring> get_profile_names(std::wstring name) {
+    static const wchar_t* well_known_parts[]{ L"Win64", L"WinGDK", L"Shipping", L"Test", L"Debug", L"DebugGame" };
+
+    std::vector<std::wstring> names{ name };
+
+    for (auto dash = name.rfind(L'-'); dash != std::wstring::npos && dash > 0; dash = name.rfind(L'-')) {
+        const auto part = name.substr(dash + 1);
+        bool known = false;
+
+        for (const auto well_known : well_known_parts) {
+            known = known || _wcsicmp(part.c_str(), well_known) == 0;
+        }
+
+        if (!known) {
+            break;
+        }
+
+        name.resize(dash);
+        names.push_back(name);
+    }
+
+    return names;
+}
+
 std::filesystem::path Framework::get_persistent_dir() {
-    auto return_appdata_dir = []() -> std::filesystem::path {
-        wchar_t app_data_path[MAX_PATH]{};
-        SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+    static const auto result = []() -> std::filesystem::path {
+        const auto exe_name = std::filesystem::path(*utility::get_module_pathw(utility::get_executable())).stem();
+        const auto names = get_profile_names(exe_name.wstring());
 
-        const auto exe_name = [&]() {
-            const auto result = std::filesystem::path(*utility::get_module_pathw(utility::get_executable())).stem().string();
-            const auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / result;
-            std::filesystem::create_directories(dir);
+        // The folder beside this DLL is searched under every name before AppData is, so UEVR and a profile can ship
+        // as one archive whatever an older session left in AppData. Only folders that exist count: nothing is
+        // created while a profile might still be found under a shorter name, and the local folder never is.
+        for (const auto& base_dir : { get_local_dir(), get_global_dir() }) {
+            if (base_dir.empty()) {
+                continue;
+            }
 
-            return result;
-        }();
+            for (const auto& name : names) {
+                std::error_code ec{};
 
-        return std::filesystem::path(app_data_path) / "UnrealVRMod" / exe_name;
-    };
+                if (std::filesystem::is_directory(base_dir / name, ec)) {
+                    return base_dir / name;
+                }
+            }
+        }
 
-    static const auto result = return_appdata_dir();
+        const auto dir = get_global_dir() / exe_name;
+        std::filesystem::create_directories(dir);
+
+        return dir;
+    }();
 
     return result;
 }

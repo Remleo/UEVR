@@ -518,6 +518,16 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             float max_inner = std::max(this->raw_projections[0][1], -this->raw_projections[1][0]);
             tan_half_fov[0] = eye == 0 ? -max_outer : -max_inner;
             tan_half_fov[1] = eye == 0 ? max_inner : max_outer;
+        } else if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED) {
+            // The eye's own field, split evenly about its middle direction: the same angles, no strip rendered
+            // for nothing. The camera is yawed onto that middle (calculate_stereo_view_offset) and the layer is
+            // submitted with the same yaw, so the compositor reprojects it where the runtime asked.
+            const auto angle_left = std::atan(this->raw_projections[eye][0]);
+            const auto angle_right = std::atan(this->raw_projections[eye][1]);
+            this->canted_yaw[eye] = -(angle_left + angle_right) * 0.5f;
+            this->canted_half[eye] = (angle_right - angle_left) * 0.5f;
+            tan_half_fov[0] = -std::tan(this->canted_half[eye]);
+            tan_half_fov[1] = std::tan(this->canted_half[eye]);
         } else {
             tan_half_fov[0] = this->raw_projections[eye][0];
             tan_half_fov[1] = this->raw_projections[eye][1];
@@ -541,6 +551,15 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         view_bounds[eye][2] = 0.5f - 0.5f * this->raw_projections[eye][2] / tan_half_fov[2];
         view_bounds[eye][3] = 0.5f + 0.5f * this->raw_projections[eye][3] / tan_half_fov[3];
 
+        if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED) {
+            // Nothing is cropped: the whole width is the submitted field.
+            view_bounds[eye][0] = 0.0f;
+            view_bounds[eye][1] = 1.0f;
+        } else {
+            this->canted_yaw[eye] = 0.0f;
+            this->canted_half[eye] = 0.0f;
+        }
+
         // if we've derived the right eye, we have up to date view bounds for both so adjust the render target if necessary
         if (eye == 1) {
             if (vr->should_grow_rectangle_for_projection_cropping()) {
@@ -563,6 +582,9 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
                                                                                             this->raw_projections[eye][2], this->raw_projections[eye][3]);
         SPDLOG_INFO("Derived FOV for {} eye:  {}, {}, {}, {}", eye == 0 ? "left" : "right", left, right, top, bottom);
         SPDLOG_INFO("Derived texture bounds {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", view_bounds[eye][0], view_bounds[eye][1], view_bounds[eye][2], view_bounds[eye][3]);
+        if (this->canted_half[eye] > 0.0f) {
+            SPDLOG_INFO("Canted {} eye: yaw {} deg, half width {} deg", eye == 0 ? "left" : "right", glm::degrees(this->canted_yaw[eye]), glm::degrees(this->canted_half[eye]));
+        }
         float sum_rl = (right + left);
         float sum_tb = (top + bottom);
         float inv_rl = (1.0f / (right - left));
@@ -575,6 +597,15 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             0.0f, 0.0f, nearz, 0.0f
         };
     };
+
+    {
+        const auto& vr = VR::get();
+
+        if (this->projection_overrides_changed(vr->get_horizontal_projection_override(), vr->get_vertical_projection_override(),
+                                               vr->should_grow_rectangle_for_projection_cropping())) {
+            this->should_recalculate_eye_projections = true;
+        }
+    }
 
     // if we've not yet derived an eye projection matrix, or we've changed the projection, derive it here
     // Hacky way to check for an uninitialised eye matrix - is there something better, is this necessary?
@@ -1086,7 +1117,7 @@ std::optional<std::string> OpenXR::initialize_actions(const std::string& json_st
 
         // If not, check for global profile in UEVR\Profiles dir
         if (!std::filesystem::exists(filename)) {
-            filename = (Framework::get_persistent_dir() / ".." / "UEVR" / "Profiles" / profile_file).string();
+            filename = (Framework::get_global_dir() / "UEVR" / "Profiles" / profile_file).string();
             spdlog::info("[VR] Setting bindings file to {}", filename);
         }
 
@@ -1853,6 +1884,18 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             // The field of view is the same in either space: it belongs to the projection, not to the pose.
             projection_layer_views[i].pose = head_locked_world ? this->views[i].pose : pipelined_stage_views[i].pose;
             projection_layer_views[i].fov = pipelined_stage_views[i].fov;
+
+            // Canted: the picture was rendered yawed onto the middle of the eye's field, symmetric about it, so it is
+            // submitted the same way and the compositor puts it back where the runtime asked.
+            if (i < 2 && this->canted_half[i] > 0.0f) {
+                auto& pose = projection_layer_views[i].pose;
+                const auto yaw = glm::angleAxis(this->canted_yaw[i], glm::vec3{0.0f, 1.0f, 0.0f});
+                pose.orientation = OpenXR::to_openxr(glm::normalize(OpenXR::to_glm(pose.orientation) * yaw));
+
+                auto& fov = projection_layer_views[i].fov;
+                fov.angleLeft = -this->canted_half[i];
+                fov.angleRight = this->canted_half[i];
+            }
             projection_layer_views[i].subImage.swapchain = swapchain->handle;
 
             int32_t offset_x = 0, offset_y = 0, extent_x = 0, extent_y = 0;

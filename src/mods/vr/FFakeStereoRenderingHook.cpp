@@ -5102,7 +5102,13 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         }
 
         if (!is_2d_screen) {
-            const auto euler = glm::degrees(utility::math::euler_angles_from_steamvr(new_rotation));
+            // A canted projection yaws the camera onto the middle of the eye's field (OpenXR.cpp); only the
+            // direction turns, the eye stays where eye_separation put it.
+            const auto canted_yaw = true_index < 2 ? vr->get_runtime()->canted_yaw[true_index] : 0.0f;
+            const auto view_rotation_eye = canted_yaw != 0.0f
+                ? glm::normalize(new_rotation * glm::angleAxis(canted_yaw, glm::vec3{0.0f, 1.0f, 0.0f}))
+                : new_rotation;
+            const auto euler = glm::degrees(utility::math::euler_angles_from_steamvr(view_rotation_eye));
 
             if (!has_double_precision) {
                 view_rotation->pitch = euler.x;
@@ -5347,13 +5353,23 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
         // so dividing every tangent by z multiplies m[0][0] and m[1][1] by z and leaves the offsets
         // alone. Leaving them alone is the point: it keeps the off-centre frustum the runtime asked for,
         // so the view centre stays put and the eyes stay consistent.
+        //
+        // A canted projection is centred on the yawed camera axis, not on where the eye looks straight, so
+        // scaled alone it would magnify about that axis and swing the eye's line of sight away by z times
+        // the yaw (Quest, x3 scope: 13 degrees). The offset then keeps the eye's own straight-ahead, at
+        // tangent tan(yaw) right of the axis, where it lands unmagnified: m[2][0] -= (z - 1) m[0][0] tan(yaw).
         const auto zoom = vr->get_zoom_factor();
 
         if (zoom > 1.0f) {
+            const auto canted_yaw = true_index < 2 ? vr->get_runtime()->canted_yaw[true_index] : 0.0f;
+            const auto straight_ahead = std::tan(canted_yaw);
+
             if (!g_hook->m_has_double_precision) {
+                (*out)[2][0] -= (zoom - 1.0f) * (*out)[0][0] * straight_ahead;
                 (*out)[0][0] *= zoom;
                 (*out)[1][1] *= zoom;
             } else {
+                double_matrix[2][0] -= (double)(zoom - 1.0f) * double_matrix[0][0] * (double)straight_ahead;
                 double_matrix[0][0] *= (double)zoom;
                 double_matrix[1][1] *= (double)zoom;
             }

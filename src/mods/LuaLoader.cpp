@@ -314,7 +314,7 @@ void LuaLoader::reset_scripts() {
     m_known_scripts.clear();
 
     const auto autorun_path = Framework::get_persistent_dir() / "scripts";
-    const auto global_autorun_path = Framework::get_persistent_dir()  / ".." / "UEVR" / "scripts";
+    const auto global_autorun_path = Framework::get_global_dir() / "UEVR" / "scripts";
 
     spdlog::info("[LuaLoader] Creating directories {}", autorun_path.string());
     std::filesystem::create_directories(autorun_path);
@@ -348,6 +348,12 @@ void LuaLoader::reset_scripts() {
     load_scripts_from_dir(autorun_path);
     std::sort(m_known_scripts.begin(), m_known_scripts.end());
     std::sort(m_loaded_scripts.begin(), m_loaded_scripts.end());
+
+    // The main state is ready: bindings in place, scripts on disk run. Sent under the state's own lock.
+    {
+        std::scoped_lock __{m_main_state->context()->get_mutex()};
+        PluginLoader::get()->dispatch_custom_event("lua_state_created", "");
+    }
 }
 
 void LuaLoader::state_post_init(std::shared_ptr<ScriptState>& state) {

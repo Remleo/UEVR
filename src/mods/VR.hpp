@@ -69,7 +69,8 @@ public:
     enum HORIZONTAL_PROJECTION_OVERRIDE : int32_t {
         HORIZONTAL_DEFAULT,
         HORIZONTAL_SYMMETRIC,
-        HORIZONTAL_MIRROR
+        HORIZONTAL_MIRROR,
+        HORIZONTAL_CANTED
     };
 
     enum VERTICAL_PROJECTION_OVERRIDE : int32_t {
@@ -1045,6 +1046,7 @@ private:
         "Raw / default",
         "Symmetrical",
         "Mirrored",
+        "Canted",
     };
 
     static const inline std::vector<std::string> s_vertical_projection_override_names{
