@@ -7,16 +7,53 @@ to VR: whatever a game needs to run, and whatever makes it play better.
 
 ### ⬇️ [Download the latest release](https://github.com/remleo/UEVR/releases/latest)
 
-Each release lists what it changes on top of the praydog nightly it is based on.
-
-- **STALKER 2** (Update 2, UE 5.5.4) is playable: no more freeze of about a minute after injection, cvars are found,
-  the UI shows in the headset, weapons attached to the controllers work, and loading a save no longer crashes.
-- **The Outer Worlds 2**: console commands work again (`stat fps`, `user_script.txt`), and head tracking stays locked
-  behind fullscreen menus.
-
 Whatever is useful beyond my games goes to praydog as a pull request, and once he merges it or solves the problem
 his own way, the fork drops its version. UEVR is praydog's work: for documentation, support and donations use the
 links below, which all point to him.
+
+### What this fork fixes in stock UEVR
+
+Newest first.
+
+- **Canted projection** (Horizontal Projection: Canted). Both eyes now shade walls and corners the same way, at no
+  frame rate cost. Symmetrical fixes this too, but it throws about 20% of each picture away.
+- **Zoom stays centred on the eye** under Canted. Before, at x3 the view swung by about 13 degrees.
+- **Projection overrides set from a script or a plugin apply at once**, not only from the next start.
+- **A profile folder beside UEVR is used before the one in AppData**, so UEVR and a profile can ship as one archive
+  that is unpacked and run. The injector uses the same folder and has an **Open Local Dir** button.
+- **One profile for every store's build**: `Game-Win64-Shipping` (Steam) and `Game-WinGDK-Shipping` (Game Pass) both
+  find `Game`.
+- **The injector defaults to OpenXR.**
+- **Unreal Engine 5.5 support.** The UI shows in the headset. Console variables are read and set correctly on UE 5.4+:
+  before, reads returned garbage and unset the variable, so `cvars_standard.txt` did nothing. Console commands are told
+  apart from variables on UE 5.5, so the console no longer crashes. `UEngine::Exec` and the console manager are found
+  on more builds.
+- **No more crashes.** UObjectHook learns about object deletions and creations from the engine's own
+  listeners, returns only live objects, and calling a function on a destroyed object is refused instead of crashing.
+- **No freeze of about a minute after injection.**
+- **Share Distance Field Between Eyes**: distant Lumen lighting is the same in both eyes.
+- **Auto-inject** per game (`Frontend_AutoInject`, `Frontend_AutoInjectDelay` in `config.txt`).
+- **Controller motion counts as controller usage**, so an attached weapon no longer hangs in the world after half a
+  minute without a button press.
+- **Head tracking survives games whose frame number freezes or restarts.**
+- **Magnification and View Follows Aim**, with **Aim View Keeps Head Roll**.
+- **A second UI plane, fed by a script.**
+- **Lua additions**: `print` and a `log` table, aim and UI plane poses, camera freeze, holding a UI plane in place,
+  flat window size, script reset from a key or a script.
+- **The log prints UEVRBackend's own address**, so a crash can be resolved against the `.pdb`.
+
+### Tested in games
+
+**STALKER 2** (Update 2, UE 5.5.4) — ✅ **Works. No more crashes.**
+The UI shows in the headset, weapons attached to the controllers work, and both eyes see the same lighting near and
+far.
+
+> [!TIP]
+> **Ready to play: S.T.A.L.K.E.R. 2 in full VR.** UEVR by remleo with a full VR profile in one archive: unpack and
+> run. 👉 [Get it on Patreon](https://www.patreon.com/remleo/posts/s-t-l-k-e-r-2-in-171864844)
+
+**The Outer Worlds 2** — ✅ **Fixed.** No more weird glitch when you turn your head in a menu, and console commands
+work again.
 
 ### Building and contributing
 
@@ -38,7 +75,7 @@ Universal Unreal Engine VR Mod (4/5)
 
 ## Supported Engine Versions
 
-4.8 - 5.4
+4.8 - 5.5
 
 ## Links
 
