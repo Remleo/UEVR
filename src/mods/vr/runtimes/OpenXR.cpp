@@ -743,16 +743,52 @@ void OpenXR::destroy() {
     this->frame_began = false;
 }
 
+// A projection change (a script switching Canted off for a scope) is taken up by update_matrices on the game
+// thread, while the pictures already rendered with the old one are still on their way to end_frame. Submitted with
+// the new cant and bounds, each eye of those frames was shown turned by the cant (7 degrees on a Quest): the view
+// jumped as the projection changed, by one or two frames, and more often the longer the change waited for a sync.
+void OpenXR::capture_projection() {
+    std::scoped_lock _{ this->sync_assignment_mtx };
+
+    auto& state = this->pipeline_states[this->internal_frame_count % QUEUE_SIZE];
+
+    state.projection_frame = this->internal_frame_count;
+
+    for (auto eye = 0; eye < 2; ++eye) {
+        state.canted_yaw[eye] = this->canted_yaw[eye];
+        state.canted_half[eye] = this->canted_half[eye];
+
+        for (auto i = 0; i < 4; ++i) {
+            state.view_bounds[eye][i] = this->view_bounds[eye][i];
+        }
+    }
+}
+
 OpenXR::PipelineState OpenXR::get_submit_state() {
     std::scoped_lock __{ this->sync_assignment_mtx };
 
-    if (this->has_render_frame_count) {
+    const auto submitting_rendered_frame = this->has_render_frame_count;
+
+    if (submitting_rendered_frame) {
         last_submit_state = this->pipeline_states[this->internal_render_frame_count % QUEUE_SIZE];
     } else {
         last_submit_state.stage_views = get_current_stage_view();
         last_submit_state.view_space_location = this->view_space_location;
         last_submit_state.frame_state = this->frame_state;
         last_submit_state.frame_count = this->internal_frame_count;
+    }
+
+    // No projection recorded for this very frame (the slot holds an older one, or no frame is known): the current
+    // projection, as before.
+    if (!submitting_rendered_frame || last_submit_state.projection_frame != this->internal_render_frame_count) {
+        for (auto eye = 0; eye < 2; ++eye) {
+            last_submit_state.canted_yaw[eye] = this->canted_yaw[eye];
+            last_submit_state.canted_half[eye] = this->canted_half[eye];
+
+            for (auto i = 0; i < 4; ++i) {
+                last_submit_state.view_bounds[eye][i] = this->view_bounds[eye][i];
+            }
+        }
     }
 
     this->has_render_frame_count = false;
@@ -1886,15 +1922,19 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             projection_layer_views[i].fov = pipelined_stage_views[i].fov;
 
             // Canted: the picture was rendered yawed onto the middle of the eye's field, symmetric about it, so it is
-            // submitted the same way and the compositor puts it back where the runtime asked.
-            if (i < 2 && this->canted_half[i] > 0.0f) {
+            // submitted the same way and the compositor puts it back where the runtime asked. The cant and the bounds
+            // are the ones this frame was rendered with (capture_projection), not the current ones.
+            const auto eye_index = std::min<size_t>(i, 1);
+            const auto& rendered_bounds = submit_state.view_bounds[eye_index];
+
+            if (i < 2 && submit_state.canted_half[i] > 0.0f) {
                 auto& pose = projection_layer_views[i].pose;
-                const auto yaw = glm::angleAxis(this->canted_yaw[i], glm::vec3{0.0f, 1.0f, 0.0f});
+                const auto yaw = glm::angleAxis(submit_state.canted_yaw[i], glm::vec3{0.0f, 1.0f, 0.0f});
                 pose.orientation = OpenXR::to_openxr(glm::normalize(OpenXR::to_glm(pose.orientation) * yaw));
 
                 auto& fov = projection_layer_views[i].fov;
-                fov.angleLeft = -this->canted_half[i];
-                fov.angleRight = this->canted_half[i];
+                fov.angleLeft = -submit_state.canted_half[i];
+                fov.angleRight = submit_state.canted_half[i];
             }
             projection_layer_views[i].subImage.swapchain = swapchain->handle;
 
@@ -1902,15 +1942,15 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             // if we're working with a double-wide texture, use half the view bounds adjustment (as they apply to a single eye)
             int texture_area_width = is_afr ? swapchain->width : swapchain->width / 2;
             if (is_afr || i == 0) {
-                offset_x = view_bounds[i][0] * texture_area_width;
-                extent_x = view_bounds[i][1] * texture_area_width - offset_x;
+                offset_x = rendered_bounds[0] * texture_area_width;
+                extent_x = rendered_bounds[1] * texture_area_width - offset_x;
             } else {
                 // right eye double-wide
-                offset_x = texture_area_width + view_bounds[i][0] * texture_area_width;
-                extent_x = view_bounds[i][1] * texture_area_width - (offset_x - texture_area_width);
+                offset_x = texture_area_width + rendered_bounds[0] * texture_area_width;
+                extent_x = rendered_bounds[1] * texture_area_width - (offset_x - texture_area_width);
             }
-            offset_y = view_bounds[i][2] * swapchain->height;
-            extent_y = view_bounds[i][3] * swapchain->height - offset_y;
+            offset_y = rendered_bounds[2] * swapchain->height;
+            extent_y = rendered_bounds[3] * swapchain->height - offset_y;
             
             // SPDLOG_INFO("image calc for eye {} {}, {}, {}, {}", i, offset_x, extent_x, offset_y, extent_y);
             projection_layer_views[i].subImage.imageRect.offset = {offset_x, offset_y};

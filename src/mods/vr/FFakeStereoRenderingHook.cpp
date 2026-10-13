@@ -3089,6 +3089,7 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         FIntRect view_rect{x, y, x + w, y + h};
 
         vr->get_runtime()->update_matrices(0.1f, 10000.0f);
+        vr->get_runtime()->capture_projection();
 
         const auto proj_mat = vr->get_projection_matrix((VRRuntime::Eye)(true_index));
 
@@ -3641,6 +3642,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
             auto& vr = VR::get();
 
             VR::get()->get_runtime()->update_matrices(0.1f, 10000.0f);
+            VR::get()->get_runtime()->capture_projection();
 
             const auto proj_mat = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
 
@@ -4871,8 +4873,91 @@ void FFakeStereoRenderingHook::adjust_view_rect(FFakeStereoRendering* stereo, in
     }
 }
 
+namespace {
+// THE VIEW'S WAY OVER WHEN VIEW FOLLOWS AIM IS SWITCHED. The switch changes several things in one frame:
+// decoupled pitch stops (the game's pitch comes into the view), the head's rotation is held at its pose, and
+// the eye leaves the head's height for the camera's. Taken at once, the whole picture jumps.
+//
+// So the view shown last before the switch is kept, RELATIVE TO THE GAME CAMERA, and the difference between it
+// and the new mode's first view is applied in full, then let go over VR_ViewFollowsAimBlendTime, smoothstep.
+// Relative to the camera, because the camera keeps turning with the aim meanwhile, and that turn must reach the
+// view as it would without the blend. The head's height above the standing origin goes the same way. Its
+// sideways offset does not: roomscale keeps it near zero by walking the pawn, and on the way out walks the
+// pawn under the head in one frame -- blending the same offset in the view as well would count it twice.
+//
+// One answer per frame, taken on the first eye and used for the second, so the eyes never disagree.
+struct ViewFollowsAimBlend {
+    bool known{false};
+    bool following{false};
+
+    // Last frame's view relative to the game camera, the eye's own offset left out, and the head's height above
+    // the standing origin in it -- both as shown, blend included, so a switch mid-blend starts where the picture is.
+    glm::quat shown_relative{glm::identity<glm::quat>()};
+    float shown_height{0.0f};
+
+    glm::quat correction{glm::identity<glm::quat>()};
+    float height_correction{0.0f};
+    std::chrono::steady_clock::time_point started{};
+
+    // How much of the correction is applied this frame: 1 at the switch, 0 once the blend is over.
+    float remaining{0.0f};
+};
+
+ViewFollowsAimBlend g_view_follows_aim_blend{};
+
+struct ViewFollowsAimBlendResult {
+    glm::quat rotation{glm::identity<glm::quat>()};
+    float height{0.0f};
+};
+
+// `vqi_full` is the game camera's rotation, `vqi_norm` the one the view is built on (flattened under decoupled
+// pitch), `head` the head's rotation the view takes, `height` the head's height above the standing origin.
+// Returns the rotation to put in front of vqi_norm and the height to add.
+ViewFollowsAimBlendResult blend_view_follows_aim(const std::shared_ptr<VR>& vr, int true_index, const glm::quat& vqi_full,
+                                                 const glm::quat& vqi_norm, const glm::quat& head, float height) {
+    auto& b = g_view_follows_aim_blend;
+    const auto relative_now = glm::normalize(glm::inverse(vqi_full) * vqi_norm * head);
+
+    if (true_index == 0) {
+        const auto following = vr->is_view_following_aim();
+        const auto blend_time = vr->get_view_follows_aim_blend_time();
+        const auto now = std::chrono::steady_clock::now();
+
+        if (b.known && following != b.following && blend_time > 0.0f) {
+            b.correction = glm::normalize(b.shown_relative * glm::inverse(relative_now));
+            b.height_correction = b.shown_height - height;
+            b.started = now;
+            b.remaining = 1.0f;
+        }
+
+        b.known = true;
+        b.following = following;
+
+        if (b.remaining > 0.0f) {
+            const auto elapsed = std::chrono::duration<float>(now - b.started).count();
+            const auto t = blend_time > 0.0f ? glm::clamp(elapsed / blend_time, 0.0f, 1.0f) : 1.0f;
+
+            b.remaining = 1.0f - t * t * (3.0f - 2.0f * t);
+        }
+    }
+
+    const auto correction = b.remaining > 0.0f
+                            ? glm::slerp(glm::identity<glm::quat>(), b.correction, b.remaining)
+                            : glm::identity<glm::quat>();
+    const auto height_now = b.height_correction * b.remaining;
+
+    if (true_index == 0) {
+        b.shown_relative = glm::normalize(correction * relative_now);
+        b.shown_height = height + height_now;
+    }
+
+    // The correction lives in the camera's frame: carried into the world by the camera's rotation.
+    return { glm::normalize(vqi_full * correction * glm::inverse(vqi_full)), height_now };
+}
+}
+
 __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
-    FFakeStereoRendering* stereo, const int32_t view_index, Rotator<float>* view_rotation, 
+    FFakeStereoRendering* stereo, const int32_t view_index, Rotator<float>* view_rotation,
     const float world_to_meters, Vector3f* view_location)
 {
 #ifdef FFAKE_STEREO_RENDERING_LOG_ALL_CALLS
@@ -5020,6 +5105,9 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
 
     auto vqi_norm = glm::normalize(view_quat_inverse);
 
+    // The game camera's whole rotation, pitch included, whatever decoupled pitch does to vqi_norm below.
+    const auto vqi_full = vqi_norm;
+
     // Decoupled Pitch
     if (vr->is_decoupled_pitch_enabled()) {
         vr->set_pre_flattened_rotation(vqi_norm);
@@ -5064,9 +5152,6 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         const auto current_hmd_rotation = glm::normalize(rotation_offset * scaled_head_rotation);
         const auto current_eye_rotation_offset = glm::normalize(glm::quat{vr->get_eye_transform(true_index)});
 
-        const auto new_rotation = glm::normalize(vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
-        const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
-
         // While the view follows the aim, the eye sits on the game's own camera.
         //
         // The game animates the weapon up to that camera, so it is the eye point the sights are built
@@ -5074,9 +5159,17 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         // has nothing to answer it anyway -- the pawn cannot rise. Sideways, roomscale does answer, but
         // by walking the pawn with a sweep that geometry can block while the recenter below credits the
         // movement regardless. The roomscale block further down is skipped in this state.
-        const auto standing_delta = vr->is_view_following_aim()
-                                    ? Vector4f{0.0f, 0.0f, 0.0f, 0.0f}
-                                    : vr->get_position(0) - vr->get_standing_origin();
+        auto standing_delta = vr->is_view_following_aim()
+                              ? Vector4f{0.0f, 0.0f, 0.0f, 0.0f}
+                              : vr->get_position(0) - vr->get_standing_origin();
+
+        const auto follow_blend = blend_view_follows_aim(vr, true_index, vqi_full, vqi_norm, current_hmd_rotation,
+                                                         standing_delta.y);
+
+        standing_delta.y += follow_blend.height;
+
+        const auto new_rotation = glm::normalize(follow_blend.rotation * vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
+        const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
 
         const auto standing_delta_flat = glm::vec3{standing_delta.x, 0, standing_delta.z};
 
@@ -5328,13 +5421,16 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
 
         if (!g_hook->m_has_double_precision) {
             float old_znear = (*out)[3][2];
-            VR::get()->m_nearz = old_znear;            
+            VR::get()->m_nearz = old_znear;
             VR::get()->get_runtime()->update_matrices(old_znear, 10000.0f);
         } else {
             double old_znear = (double_matrix)[3][2];
             VR::get()->m_nearz = (float)old_znear;
             VR::get()->get_runtime()->update_matrices((float)old_znear, 10000.0f);
         }
+
+        // Whatever this frame renders with is what it must be submitted with.
+        VR::get()->get_runtime()->capture_projection();
 
         if (!g_hook->m_has_double_precision) {
             *out = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));

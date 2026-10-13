@@ -1598,6 +1598,7 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
     }
 
     runtime->update_matrices(m_nearz, m_farz);
+    runtime->capture_projection();
 
     runtime->got_first_poses = true;
 }
@@ -2772,6 +2773,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
 
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("When enabled, the aim turns the view instead of only the reticle, so the shot goes to the middle of the picture.");
+            }
+
+            m_view_follows_aim_blend_time->draw("View Follows Aim Blend Time");
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Seconds the view takes to go over when View Follows Aim is switched on or off, instead of jumping. 0 jumps.");
             }
 
             m_aim_view_keeps_head_roll->draw("Aim View Keeps Head Roll");
