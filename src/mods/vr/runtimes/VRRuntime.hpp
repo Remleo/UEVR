@@ -89,6 +89,10 @@ struct VRRuntime {
         return Error::SUCCESS;
     }
 
+    // Records the projection this game frame renders with, after update_matrices, for the submit of that frame.
+    virtual void capture_projection() {
+    }
+
     virtual Error update_input() {
         return Error::SUCCESS;
     }

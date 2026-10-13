@@ -1598,6 +1598,7 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
     }
 
     runtime->update_matrices(m_nearz, m_farz);
+    runtime->capture_projection();
 
     runtime->got_first_poses = true;
 }

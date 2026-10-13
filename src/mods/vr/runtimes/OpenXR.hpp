@@ -90,6 +90,7 @@ struct OpenXR final : public VRRuntime {
     VRRuntime::Error consume_events(std::function<void(void*)> callback) override;
 
     VRRuntime::Error update_matrices(float nearz, float farz) override;
+    void capture_projection() override;
     VRRuntime::Error update_input() override;
 
     void destroy() override;
@@ -215,6 +216,14 @@ public:
         std::vector<XrView> stage_views{};
         uint32_t frame_count{0}; // Updated on game thread prior to rendering
         uint32_t prev_frame_count{0}; // Updated right after xrWaitFrame is called
+
+        // The projection the frame was rendered with (capture_projection), so it is submitted with that one and
+        // not with whatever the projection is by the time the picture reaches end_frame. Valid only when
+        // projection_frame is the frame being submitted: the slot is reused every QUEUE_SIZE frames.
+        uint32_t projection_frame{0};
+        float canted_yaw[2]{};
+        float canted_half[2]{};
+        float view_bounds[2][4]{};
     };
     /*std::array<std::vector<XrView>, 3> stage_view_queue{};
     std::array<XrSpaceLocation, 3> view_space_location_queue{};

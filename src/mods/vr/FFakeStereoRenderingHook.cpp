@@ -3089,6 +3089,7 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         FIntRect view_rect{x, y, x + w, y + h};
 
         vr->get_runtime()->update_matrices(0.1f, 10000.0f);
+        vr->get_runtime()->capture_projection();
 
         const auto proj_mat = vr->get_projection_matrix((VRRuntime::Eye)(true_index));
 
@@ -3641,6 +3642,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
             auto& vr = VR::get();
 
             VR::get()->get_runtime()->update_matrices(0.1f, 10000.0f);
+            VR::get()->get_runtime()->capture_projection();
 
             const auto proj_mat = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
 
@@ -5426,6 +5428,9 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
             VR::get()->m_nearz = (float)old_znear;
             VR::get()->get_runtime()->update_matrices((float)old_znear, 10000.0f);
         }
+
+        // Whatever this frame renders with is what it must be submitted with.
+        VR::get()->get_runtime()->capture_projection();
 
         if (!g_hook->m_has_double_precision) {
             *out = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
