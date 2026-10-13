@@ -398,6 +398,13 @@ public:
         return m_view_follows_aim->value();
     }
 
+    // How long the view takes to go over when View Follows Aim is switched, in seconds. The switch changes
+    // several things at once -- the game's pitch comes into the view, the head is held, the eye goes to the
+    // camera's height -- and taken in one frame that is a jump of the whole picture.
+    float get_view_follows_aim_blend_time() const {
+        return m_view_follows_aim_blend_time->value();
+    }
+
     // Whether the head keeps the roll while the view follows the aim. The aim owns where the view looks
     // either way -- roll is the one component it has no opinion about, because turning the camera about
     // its own forward axis does not move the point the shot goes to. Off, the head has no say in the
@@ -1125,6 +1132,7 @@ private:
     const ModSlider::Ptr m_camera_fov_distance_multiplier{ ModSlider::create(generate_name("CameraFOVDistanceMultiplier"), 0.00f, 1000.0f, 0.0f) };
     const ModSlider::Ptr m_zoom_factor{ ModSlider::create(generate_name("ZoomFactor"), 1.0f, 8.0f, 1.0f) };
     const ModToggle::Ptr m_view_follows_aim{ ModToggle::create(generate_name("ViewFollowsAim"), false) };
+    const ModSlider::Ptr m_view_follows_aim_blend_time{ ModSlider::create(generate_name("ViewFollowsAimBlendTime"), 0.0f, 1.0f, 0.3f) };
     const ModToggle::Ptr m_aim_view_keeps_head_roll{ ModToggle::create(generate_name("AimViewKeepsHeadRoll"), false) };
     const ModSlider::Ptr m_world_scale{ ModSlider::create(generate_name("WorldScale"), 0.01f, 10.0f, 1.0f) };
     const ModSlider::Ptr m_depth_scale{ ModSlider::create(generate_name("DepthScale"), 0.01f, 1.0f, 1.0f) };
@@ -1252,6 +1260,7 @@ public:
             *m_camera_up_offset,
             *m_zoom_factor,
             *m_view_follows_aim,
+            *m_view_follows_aim_blend_time,
             *m_aim_view_keeps_head_roll,
             *m_world_scale,
             *m_depth_scale,
