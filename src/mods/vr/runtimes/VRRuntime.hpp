@@ -7,6 +7,7 @@
 #include <shared_mutex>
 #include <optional>
 #include <array>
+#include <chrono>
 
 #include <spdlog/spdlog.h>
 #include <sdk/Math.hpp>
@@ -191,10 +192,23 @@ struct VRRuntime {
     float view_bounds[2][4] = {0, 1, 0, 1, 0, 1, 0, 1};
 
     // Canted horizontal projection: each eye's camera is yawed by canted_yaw (radians, about the view's +Y, so
-    // positive turns it left) onto the middle of its own field of view, which is then symmetric, canted_half wide
-    // on each side. Derived with the projections; zero while the override is not canted.
+    // positive turns it left) towards the middle of its own field of view, and the field's edges are canted_left and
+    // canted_right (radians, from that yawed axis, left negative). Fully canted the axis is on the middle and the field
+    // symmetric; on the way to or from the raw projection (cant_weight) the axis stands part of the way. Derived with the
+    // projections; all zero while no cant is in effect.
     float canted_yaw[2]{};
-    float canted_half[2]{};
+    float canted_left[2]{};
+    float canted_right[2]{};
+
+    bool is_canted(int eye) const {
+        return canted_right[eye] - canted_left[eye] > 0.0f;
+    }
+
+    // How far into Canted the projection is, 0 raw .. 1 canted, eased in the derivation. Moves towards the override over
+    // VR_ProjectionBlendTime: switched at once, the view jumped by the cant as a script changed the projection for a scope.
+    float cant_weight{0.0f};
+    bool cant_weight_known{false};
+    std::chrono::steady_clock::time_point cant_weight_time{};
 
     // True once when an override differs from what the projections were last derived with. A value written by a
     // script (set_mod_value) never passes the panel, the only other place that asks for a new derivation.

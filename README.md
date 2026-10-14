@@ -1,5 +1,9 @@
 # UEVR remleo Edition
 
+| Game | Ready-to-play VR build |
+|:---:|:---|
+| [![S.T.A.L.K.E.R. 2: Heart of Chornobyl](docs/images/stalker2.png)](https://www.patreon.com/remleo/posts/s-t-l-k-e-r-2-in-171864844) | **S.T.A.L.K.E.R. 2** (Update 2.0, UE 5.5): this UEVR with a full VR profile already in it, in one archive. Unpack and run.<br><br>👉 **[Grab it](https://www.patreon.com/remleo/posts/s-t-l-k-e-r-2-in-171864844)** |
+
 ## About this fork
 
 This is a fork of [praydog/UEVR](https://github.com/praydog/UEVR) where I fix and improve UEVR for the games I bring
@@ -15,6 +19,13 @@ links below, which all point to him.
 
 Newest first.
 
+- **Smooth switch between Raw and Canted.** When the projection changes while you play (a profile does it as you aim
+  down the sights), the eyes turn over gradually instead of jumping by 7 degrees, with no fish-eye pull on the way:
+  every frame reaches the headset with the projection it was rendered with. **Projection Blend Time**, 0.3 s by default;
+  0 switches at once.
+- **View Follows Aim eases in and out** instead of jumping the whole picture when it is switched on or off (a profile
+  does it while you aim down the sights), with no dip when the right controller is aiming. **View Follows Aim Blend
+  Time**, 0.3 s by default; 0 jumps as before.
 - **Canted projection** (Horizontal Projection: Canted). Both eyes now shade walls and corners the same way, at no
   frame rate cost. Symmetrical fixes this too, but it throws about 20% of each picture away.
 - **Zoom stays centred on the eye** under Canted. Before, at x3 the view swung by about 13 degrees.
@@ -41,21 +52,6 @@ Newest first.
 - **Lua additions**: `print` and a `log` table, aim and UI plane poses, camera freeze, holding a UI plane in place,
   flat window size, script reset from a key or a script.
 - **The log prints UEVRBackend's own address**, so a crash can be resolved against the `.pdb`.
-
-### Games fixed by this fork
-
-#### STALKER 2 (Update 2, UE 5.5.4)
-
-✅ **Works. No more crashes.** The UI shows in the headset, weapons attached to the controllers work, and both eyes
-see the same lighting near and far.
-
-> [!TIP]
-> **Ready to play: S.T.A.L.K.E.R. 2 in full VR.** UEVR by remleo with a full VR profile in one archive: unpack and
-> run. 👉 [Get it on Patreon](https://www.patreon.com/remleo/posts/s-t-l-k-e-r-2-in-171864844)
-
-#### The Outer Worlds 2
-
-✅ **Fixed.** No more weird glitch when you turn your head in a menu, and console commands work again.
 
 ### Building and contributing
 

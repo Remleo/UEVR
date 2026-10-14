@@ -793,6 +793,11 @@ public:
         return m_horizontal_projection_override->value();
     }
 
+    // Seconds a switch between the raw and the canted horizontal projection takes, the eyes turning by a share of the
+    // cant each frame instead of all of it in one. 0 switches at once.
+    float get_projection_blend_time() const {
+        return m_projection_blend_time->value();
+    }
     auto get_vertical_projection_override() const {
         return m_vertical_projection_override->value();
     }
@@ -1083,6 +1088,7 @@ private:
     const ModCombo::Ptr m_horizontal_projection_override{ModCombo::create(generate_name("HorizontalProjectionOverride"), s_horizontal_projection_override_names)};
     const ModCombo::Ptr m_vertical_projection_override{ModCombo::create(generate_name("VerticalProjectionOverride"), s_vertical_projection_override_names)};
     const ModToggle::Ptr m_grow_rectangle_for_projection_cropping{ModToggle::create(generate_name("GrowRectangleForProjectionCropping"), false)};
+    const ModSlider::Ptr m_projection_blend_time{ModSlider::create(generate_name("ProjectionBlendTime"), 0.0f, 1.0f, 0.3f)};
     const ModCombo::Ptr m_sync_mode{ ModCombo::create(generate_name("SynchronizationMode"), s_sync_mode_names, 2) };
 
     // Snap turn settings and globals
@@ -1240,6 +1246,7 @@ public:
             *m_horizontal_projection_override,
             *m_vertical_projection_override,
             *m_grow_rectangle_for_projection_cropping,
+            *m_projection_blend_time,
             *m_snapturn,
             *m_snapturn_joystick_deadzone,
             *m_snapturn_angle,

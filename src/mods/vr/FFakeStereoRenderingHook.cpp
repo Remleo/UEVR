@@ -4899,9 +4899,23 @@ struct ViewFollowsAimBlend {
     float height_correction{0.0f};
     std::chrono::steady_clock::time_point started{};
 
+    // When View Follows Aim last switched; a rebase restarts `started`, not this.
+    std::chrono::steady_clock::time_point switched{};
+
     // How much of the correction is applied this frame: 1 at the switch, 0 once the blend is over.
     float remaining{0.0f};
+
+    // The rotation offset of the frame before, to see one turned at once in the middle of a blend.
+    glm::quat last_offset{glm::identity<glm::quat>()};
 };
+
+// A rotation offset turned by more than this in one frame, right after the switch, is the aim path's recentre.
+constexpr float VIEW_BLEND_REBASE_DEGREES = 1.5f;
+
+// Only this long after the switch: the recentre comes a frame or two later. Past it the offset is the aim's own --
+// with the right controller leading, the aim path writes it every frame as the hand turns, and a rebase on each of
+// those held the picture where it was for as long as the hand moved (measured: 47 rebases in a row on one aim's end).
+constexpr float VIEW_BLEND_REBASE_WINDOW = 0.1f;
 
 ViewFollowsAimBlend g_view_follows_aim_blend{};
 
@@ -4914,7 +4928,8 @@ struct ViewFollowsAimBlendResult {
 // pitch), `head` the head's rotation the view takes, `height` the head's height above the standing origin.
 // Returns the rotation to put in front of vqi_norm and the height to add.
 ViewFollowsAimBlendResult blend_view_follows_aim(const std::shared_ptr<VR>& vr, int true_index, const glm::quat& vqi_full,
-                                                 const glm::quat& vqi_norm, const glm::quat& head, float height) {
+                                                 const glm::quat& vqi_norm, const glm::quat& head, float height,
+                                                 const glm::quat& rotation_offset) {
     auto& b = g_view_follows_aim_blend;
     const auto relative_now = glm::normalize(glm::inverse(vqi_full) * vqi_norm * head);
 
@@ -4923,10 +4938,28 @@ ViewFollowsAimBlendResult blend_view_follows_aim(const std::shared_ptr<VR>& vr, 
         const auto blend_time = vr->get_view_follows_aim_blend_time();
         const auto now = std::chrono::steady_clock::now();
 
+        // A RECENTRE IN THE MIDDLE OF A BLEND starts it again from where the picture is. The controller's aim path
+        // recentres the horizon on the head as the view binds -- a frame AFTER the switch this blend measured -- and
+        // the correction taken then no longer matched: the view dropped by the head's pitch and rose back through the
+        // blend. Taken from the picture shown, the recentre moves nothing and the blend eases from there.
+        const auto offset_turn = glm::degrees(2.0f * std::acos(glm::clamp(glm::abs(glm::dot(b.last_offset, rotation_offset)), 0.0f, 1.0f)));
+
+        const auto since_switch = std::chrono::duration<float>(now - b.switched).count();
+
+        if (b.known && b.remaining > 0.0f && blend_time > 0.0f && since_switch <= VIEW_BLEND_REBASE_WINDOW &&
+            offset_turn > VIEW_BLEND_REBASE_DEGREES) {
+            b.correction = glm::normalize(b.shown_relative * glm::inverse(relative_now));
+            b.started = now;
+            b.remaining = 1.0f;
+        }
+
+        b.last_offset = rotation_offset;
+
         if (b.known && following != b.following && blend_time > 0.0f) {
             b.correction = glm::normalize(b.shown_relative * glm::inverse(relative_now));
             b.height_correction = b.shown_height - height;
             b.started = now;
+            b.switched = now;
             b.remaining = 1.0f;
         }
 
@@ -5139,6 +5172,16 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
     if (!vr->is_stereo_emulation_enabled()) {
         const auto is_2d_screen = vr->is_using_2d_screen();
 
+        // The cant (read below as canted_yaw) and the projection matrix move together in update_matrices, once per frame
+        // sync. Asked for here too, so a view offset computed before this frame's projection matrix takes this frame's
+        // cant rather than the last one. Presumably that frame of lag is what was felt while Canted blended in or out:
+        // each eye yawed by the previous step and projected by the new one -- opposite errors in the two eyes, the world
+        // drawing in towards the nose until the blend ended. How to check: with VR_ProjectionBlendTime long (1 s), the
+        // pull should be gone; with this call removed, back.
+        vr->get_runtime()->update_matrices(vr->m_nearz, 10000.0f);
+
+        vr->get_runtime()->capture_projection();
+
         const auto rotation_offset = vr->get_rotation_offset();
 
         // Only the view is scaled -- not the aim methods, not the attachments.
@@ -5164,7 +5207,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                               : vr->get_position(0) - vr->get_standing_origin();
 
         const auto follow_blend = blend_view_follows_aim(vr, true_index, vqi_full, vqi_norm, current_hmd_rotation,
-                                                         standing_delta.y);
+                                                         standing_delta.y, rotation_offset);
 
         standing_delta.y += follow_blend.height;
 
@@ -5197,7 +5240,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         if (!is_2d_screen) {
             // A canted projection yaws the camera onto the middle of the eye's field (OpenXR.cpp); only the
             // direction turns, the eye stays where eye_separation put it.
-            const auto canted_yaw = true_index < 2 ? vr->get_runtime()->canted_yaw[true_index] : 0.0f;
+            const auto canted_yaw = (true_index >= 0 && true_index < 2) ? vr->get_runtime()->canted_yaw[true_index] : 0.0f;
             const auto view_rotation_eye = canted_yaw != 0.0f
                 ? glm::normalize(new_rotation * glm::angleAxis(canted_yaw, glm::vec3{0.0f, 1.0f, 0.0f}))
                 : new_rotation;
@@ -5457,7 +5500,7 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
         const auto zoom = vr->get_zoom_factor();
 
         if (zoom > 1.0f) {
-            const auto canted_yaw = true_index < 2 ? vr->get_runtime()->canted_yaw[true_index] : 0.0f;
+            const auto canted_yaw = (true_index >= 0 && true_index < 2) ? vr->get_runtime()->canted_yaw[true_index] : 0.0f;
             const auto straight_ahead = std::tan(canted_yaw);
 
             if (!g_hook->m_has_double_precision) {

@@ -2942,7 +2942,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
 
             // changes to any of these options should trigger a regeneration of the eye projection matrices
             const auto horizontal_projection_changed = m_horizontal_projection_override->draw("Horizontal Projection");
-            const auto vertical_projection_changed = m_vertical_projection_override->draw("Vertical Projection");
+
+            m_projection_blend_time->draw("Projection Blend Time");
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Seconds a switch between Raw and Canted takes, the eyes turning gradually instead of jumping. 0 switches at once.");
+            }            const auto vertical_projection_changed = m_vertical_projection_override->draw("Vertical Projection");
             const auto scale_render = m_grow_rectangle_for_projection_cropping->draw("Scale Render Target");
             const auto scale_render_changed = get_runtime()->is_modifying_eye_texture_scale != scale_render;
             get_runtime()->is_modifying_eye_texture_scale = scale_render;

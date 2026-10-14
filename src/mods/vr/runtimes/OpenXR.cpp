@@ -518,16 +518,21 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             float max_inner = std::max(this->raw_projections[0][1], -this->raw_projections[1][0]);
             tan_half_fov[0] = eye == 0 ? -max_outer : -max_inner;
             tan_half_fov[1] = eye == 0 ? max_inner : max_outer;
-        } else if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED) {
-            // The eye's own field, split evenly about its middle direction: the same angles, no strip rendered
-            // for nothing. The camera is yawed onto that middle (calculate_stereo_view_offset) and the layer is
-            // submitted with the same yaw, so the compositor reprojects it where the runtime asked.
+        } else if (this->cant_weight > 0.0f) {
+            // The eye's own field, seen from an axis turned towards its middle direction: the same angles, no strip
+            // rendered for nothing. Fully canted the axis is on the middle and the field split evenly about it; on the
+            // way to or from the raw projection the axis stands a share of the way (cant_weight, eased), and at none it
+            // is the raw projection itself. The camera is yawed onto that axis (calculate_stereo_view_offset) and the
+            // layer is submitted with the same yaw and edges, so the compositor reprojects it where the runtime asked.
             const auto angle_left = std::atan(this->raw_projections[eye][0]);
             const auto angle_right = std::atan(this->raw_projections[eye][1]);
-            this->canted_yaw[eye] = -(angle_left + angle_right) * 0.5f;
-            this->canted_half[eye] = (angle_right - angle_left) * 0.5f;
-            tan_half_fov[0] = -std::tan(this->canted_half[eye]);
-            tan_half_fov[1] = std::tan(this->canted_half[eye]);
+            const auto w = this->cant_weight;
+            const auto turn = (angle_left + angle_right) * 0.5f * (w * w * (3.0f - 2.0f * w));
+            this->canted_yaw[eye] = -turn;
+            this->canted_left[eye] = angle_left - turn;
+            this->canted_right[eye] = angle_right - turn;
+            tan_half_fov[0] = std::tan(this->canted_left[eye]);
+            tan_half_fov[1] = std::tan(this->canted_right[eye]);
         } else {
             tan_half_fov[0] = this->raw_projections[eye][0];
             tan_half_fov[1] = this->raw_projections[eye][1];
@@ -551,14 +556,18 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         view_bounds[eye][2] = 0.5f - 0.5f * this->raw_projections[eye][2] / tan_half_fov[2];
         view_bounds[eye][3] = 0.5f + 0.5f * this->raw_projections[eye][3] / tan_half_fov[3];
 
-        if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED) {
+        if (this->is_canted(eye)) {
             // Nothing is cropped: the whole width is the submitted field.
             view_bounds[eye][0] = 0.0f;
             view_bounds[eye][1] = 1.0f;
         } else {
             this->canted_yaw[eye] = 0.0f;
-            this->canted_half[eye] = 0.0f;
+            this->canted_left[eye] = 0.0f;
+            this->canted_right[eye] = 0.0f;
         }
+
+        // Logged only in a settled state: a blend between raw and canted derives every frame on its way.
+        const auto settled = this->cant_weight <= 0.0f || this->cant_weight >= 1.0f;
 
         // if we've derived the right eye, we have up to date view bounds for both so adjust the render target if necessary
         if (eye == 1) {
@@ -569,7 +578,10 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
                 eye_width_adjustment = 1;
                 eye_height_adjustment = 1;
             }
-            SPDLOG_INFO("Eye texture proportion scale: {} by {}", eye_width_adjustment, eye_height_adjustment);
+
+            if (settled) {
+                SPDLOG_INFO("Eye texture proportion scale: {} by {}", eye_width_adjustment, eye_height_adjustment);
+            }
         }
 
         const auto left =   tan_half_fov[0];
@@ -578,12 +590,16 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         const auto bottom = tan_half_fov[3];
 
         // signs: at this point we expect left[0] and bottom[3] to be negative
-        SPDLOG_INFO("Original FOV for {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", this->raw_projections[eye][0], this->raw_projections[eye][1],
-                                                                                            this->raw_projections[eye][2], this->raw_projections[eye][3]);
-        SPDLOG_INFO("Derived FOV for {} eye:  {}, {}, {}, {}", eye == 0 ? "left" : "right", left, right, top, bottom);
-        SPDLOG_INFO("Derived texture bounds {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", view_bounds[eye][0], view_bounds[eye][1], view_bounds[eye][2], view_bounds[eye][3]);
-        if (this->canted_half[eye] > 0.0f) {
-            SPDLOG_INFO("Canted {} eye: yaw {} deg, half width {} deg", eye == 0 ? "left" : "right", glm::degrees(this->canted_yaw[eye]), glm::degrees(this->canted_half[eye]));
+        if (settled) {
+            SPDLOG_INFO("Original FOV for {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", this->raw_projections[eye][0], this->raw_projections[eye][1],
+                                                                                                this->raw_projections[eye][2], this->raw_projections[eye][3]);
+            SPDLOG_INFO("Derived FOV for {} eye:  {}, {}, {}, {}", eye == 0 ? "left" : "right", left, right, top, bottom);
+            SPDLOG_INFO("Derived texture bounds {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", view_bounds[eye][0], view_bounds[eye][1], view_bounds[eye][2], view_bounds[eye][3]);
+        }
+
+        if (settled && this->is_canted(eye)) {
+            SPDLOG_INFO("Canted {} eye: yaw {} deg, half width {} deg", eye == 0 ? "left" : "right", glm::degrees(this->canted_yaw[eye]),
+                        glm::degrees((this->canted_right[eye] - this->canted_left[eye]) * 0.5f));
         }
         float sum_rl = (right + left);
         float sum_tb = (top + bottom);
@@ -600,9 +616,37 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
 
     {
         const auto& vr = VR::get();
+        const auto horizontal = vr->get_horizontal_projection_override();
 
-        if (this->projection_overrides_changed(vr->get_horizontal_projection_override(), vr->get_vertical_projection_override(),
+        if (this->projection_overrides_changed(horizontal, vr->get_vertical_projection_override(),
                                                vr->should_grow_rectangle_for_projection_cropping())) {
+            this->should_recalculate_eye_projections = true;
+        }
+
+        // THE CANT MOVES BY TIME, once per frame sync, here and nowhere else: the camera's yaw and the projection then
+        // change together, in the same derivation, so no frame renders one without the other. Only between the raw
+        // projection and Canted; any other override takes the field at once, as it always did. The first derivation
+        // starts where the override is, so a session does not open with a turn.
+        const auto now = std::chrono::steady_clock::now();
+        const auto first = !this->cant_weight_known || this->projections[0][2][3] == 0;
+        const auto target = horizontal == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED ? 1.0f : 0.0f;
+        const auto blendable = horizontal == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED ||
+                               horizontal == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_DEFAULT;
+        const auto blend_time = vr->get_projection_blend_time();
+        const auto elapsed = first ? 0.0f : std::clamp(std::chrono::duration<float>(now - this->cant_weight_time).count(), 0.0f, 0.1f);
+
+        this->cant_weight_time = now;
+        this->cant_weight_known = true;
+
+        if (this->cant_weight != target) {
+            if (first || !blendable || blend_time <= 0.0f) {
+                this->cant_weight = target;
+            } else if (this->cant_weight < target) {
+                this->cant_weight = std::min(target, this->cant_weight + elapsed / blend_time);
+            } else {
+                this->cant_weight = std::max(target, this->cant_weight - elapsed / blend_time);
+            }
+
             this->should_recalculate_eye_projections = true;
         }
     }
@@ -743,10 +787,15 @@ void OpenXR::destroy() {
     this->frame_began = false;
 }
 
-// A projection change (a script switching Canted off for a scope) is taken up by update_matrices on the game
-// thread, while the pictures already rendered with the old one are still on their way to end_frame. Submitted with
-// the new cant and bounds, each eye of those frames was shown turned by the cant (7 degrees on a Quest): the view
-// jumped as the projection changed, by one or two frames, and more often the longer the change waited for a sync.
+// A projection change (a script switching Canted off for a scope, or a blend between them) is taken up by
+// update_matrices on the game thread, while the pictures already rendered with the old one are still on their way to
+// end_frame. Submitted with another cant and bounds than they were rendered with, each eye was shown turned by the
+// difference, the two eyes opposite ways: the world drawn in towards the nose, a fish-eye pull through every blend.
+//
+// Keyed by the runtime's frame count of the moment and taken after every update_matrices of the game frame. DO NOT key
+// it by the view offset's own frame number (g_frame_count) instead: by the log that matched the view offset's cant 688
+// times in 690, and the player felt a fish-eye pull through every blend that this keying does not show -- a record that
+// agrees with the view offset is not a record that agrees with the picture.
 void OpenXR::capture_projection() {
     std::scoped_lock _{ this->sync_assignment_mtx };
 
@@ -756,7 +805,8 @@ void OpenXR::capture_projection() {
 
     for (auto eye = 0; eye < 2; ++eye) {
         state.canted_yaw[eye] = this->canted_yaw[eye];
-        state.canted_half[eye] = this->canted_half[eye];
+        state.canted_left[eye] = this->canted_left[eye];
+        state.canted_right[eye] = this->canted_right[eye];
 
         for (auto i = 0; i < 4; ++i) {
             state.view_bounds[eye][i] = this->view_bounds[eye][i];
@@ -778,16 +828,30 @@ OpenXR::PipelineState OpenXR::get_submit_state() {
         last_submit_state.frame_count = this->internal_frame_count;
     }
 
-    // No projection recorded for this very frame (the slot holds an older one, or no frame is known): the current
-    // projection, as before.
-    if (!submitting_rendered_frame || last_submit_state.projection_frame != this->internal_render_frame_count) {
-        for (auto eye = 0; eye < 2; ++eye) {
-            last_submit_state.canted_yaw[eye] = this->canted_yaw[eye];
-            last_submit_state.canted_half[eye] = this->canted_half[eye];
+    // The record of the rendered frame; failing that the newest before it within one game frame (two counts here), so a
+    // frame whose view offset did not run keeps the cant of the one before rather than the current one.
+    const PipelineState* best = nullptr;
 
-            for (auto i = 0; i < 4; ++i) {
-                last_submit_state.view_bounds[eye][i] = this->view_bounds[eye][i];
+    if (submitting_rendered_frame) {
+        for (const auto& state : this->pipeline_states) {
+            if (state.projection_frame <= this->internal_render_frame_count &&
+                this->internal_render_frame_count - state.projection_frame <= 2 &&
+                (best == nullptr || state.projection_frame > best->projection_frame)) {
+                best = &state;
             }
+        }
+    }
+
+    // No projection recorded for that frame (or no frame is known): the current projection, as before.
+    last_submit_state.projection_frame = best != nullptr ? best->projection_frame : 0;
+
+    for (auto eye = 0; eye < 2; ++eye) {
+        last_submit_state.canted_yaw[eye] = best != nullptr ? best->canted_yaw[eye] : this->canted_yaw[eye];
+        last_submit_state.canted_left[eye] = best != nullptr ? best->canted_left[eye] : this->canted_left[eye];
+        last_submit_state.canted_right[eye] = best != nullptr ? best->canted_right[eye] : this->canted_right[eye];
+
+        for (auto i = 0; i < 4; ++i) {
+            last_submit_state.view_bounds[eye][i] = best != nullptr ? best->view_bounds[eye][i] : this->view_bounds[eye][i];
         }
     }
 
@@ -1927,15 +1991,17 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             const auto eye_index = std::min<size_t>(i, 1);
             const auto& rendered_bounds = submit_state.view_bounds[eye_index];
 
-            if (i < 2 && submit_state.canted_half[i] > 0.0f) {
+            if (i < 2 && submit_state.canted_right[i] - submit_state.canted_left[i] > 0.0f) {
                 auto& pose = projection_layer_views[i].pose;
                 const auto yaw = glm::angleAxis(submit_state.canted_yaw[i], glm::vec3{0.0f, 1.0f, 0.0f});
                 pose.orientation = OpenXR::to_openxr(glm::normalize(OpenXR::to_glm(pose.orientation) * yaw));
 
+                // The field from the yawed axis: symmetric when fully canted, part of the way otherwise.
                 auto& fov = projection_layer_views[i].fov;
-                fov.angleLeft = -submit_state.canted_half[i];
-                fov.angleRight = submit_state.canted_half[i];
+                fov.angleLeft = submit_state.canted_left[i];
+                fov.angleRight = submit_state.canted_right[i];
             }
+
             projection_layer_views[i].subImage.swapchain = swapchain->handle;
 
             int32_t offset_x = 0, offset_y = 0, extent_x = 0, extent_y = 0;
