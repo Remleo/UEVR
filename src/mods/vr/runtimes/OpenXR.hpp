@@ -222,7 +222,8 @@ public:
         // projection_frame is the frame being submitted: the slot is reused every QUEUE_SIZE frames.
         uint32_t projection_frame{0};
         float canted_yaw[2]{};
-        float canted_half[2]{};
+        float canted_left[2]{};
+        float canted_right[2]{};
         float view_bounds[2][4]{};
     };
     /*std::array<std::vector<XrView>, 3> stage_view_queue{};
