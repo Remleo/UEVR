@@ -1,6 +1,9 @@
 #include <thread>
 #include <future>
 #include <unordered_set>
+#include <filesystem>
+#include <format>
+#include <intrin.h>
 
 #include <spdlog/spdlog.h>
 #include <utility/Thread.hpp>
@@ -13,6 +16,20 @@
 #include "D3D12Hook.hpp"
 
 static D3D12Hook* g_d3d12_hook = nullptr;
+
+// "module.dll+rva" for the log, or the bare address outside any module.
+static std::string describe_address(uintptr_t address) {
+    const auto module = utility::get_module_within(address);
+
+    if (!module) {
+        return std::format("{:x}", address);
+    }
+
+    const auto path = utility::get_module_path(*module);
+    const auto name = path ? std::filesystem::path{*path}.filename().string() : std::string{"?"};
+
+    return std::format("{}+{:x}", name, address - (uintptr_t)*module);
+}
 
 D3D12Hook::~D3D12Hook() {
     unhook();
@@ -338,6 +355,8 @@ bool D3D12Hook::hook() {
         m_present_hook.reset();
         m_present1_hook.reset();
         m_swapchain_hook.reset();
+        m_resize_buffers_dxgi_hook = {};
+        m_resize_buffers1_dxgi_hook = {};
 
         m_is_phase_1 = true;
 
@@ -345,6 +364,31 @@ bool D3D12Hook::hook() {
         auto& present1_fn = (*(void***)target_swapchain)[22]; // Present1
         m_present_hook = std::make_unique<PointerHook>(&present_fn, (void*)&D3D12Hook::present);
         m_present1_hook = std::make_unique<PointerHook>(&present1_fn, (void*)&D3D12Hook::present1);
+
+        // dxgi's ResizeBuffers and ResizeBuffers1 themselves, so a resize lets go of our back buffers whichever way it comes
+        // (resize_in_dxgi). Started disabled and enabled once stored: the handlers call the original through the stored hook.
+        auto hook_dxgi = [&](safetyhook::InlineHook& hook, size_t index, void* destination, const char* name) {
+            const auto target = (*(void***)target_swapchain)[index];
+
+            hook = safetyhook::create_inline(target, destination, safetyhook::InlineHook::StartDisabled);
+
+            if (!hook) {
+                spdlog::error("Failed to hook {} at {}", name, describe_address((uintptr_t)target));
+                return;
+            }
+
+            if (auto enabled = hook.enable(); !enabled.has_value()) {
+                spdlog::error("Failed to enable the {} hook at {}", name, describe_address((uintptr_t)target));
+                hook = {};
+                return;
+            }
+
+            spdlog::info("Hooked {} at {}", name, describe_address((uintptr_t)target));
+        };
+
+        hook_dxgi(m_resize_buffers_dxgi_hook, 13, (void*)&D3D12Hook::resize_buffers_dxgi, "ResizeBuffers");
+        hook_dxgi(m_resize_buffers1_dxgi_hook, 39, (void*)&D3D12Hook::resize_buffers1_dxgi, "ResizeBuffers1");
+
         m_hooked = true;
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize hooks: {}", e.what());
@@ -378,6 +422,8 @@ bool D3D12Hook::unhook() {
     m_present_hook.reset();
     m_present1_hook.reset();
     m_swapchain_hook.reset();
+    m_resize_buffers_dxgi_hook = {};
+    m_resize_buffers1_dxgi_hook = {};
 
     m_hooked = false;
     m_is_phase_1 = true;
@@ -567,6 +613,12 @@ HRESULT WINAPI D3D12Hook::resize_buffers(IDXGISwapChain3* swap_chain, UINT buffe
         return resize_buffers_fn(swap_chain, buffer_count, width, height, new_format, swap_chain_flags);
     }
 
+    // The hook on dxgi's own function lets go of our back buffers for every resize (resize_in_dxgi); this one only stands
+    // in for it where it could not be put on.
+    if (d3d12->m_resize_buffers_dxgi_hook.enabled()) {
+        return resize_buffers_fn(swap_chain, buffer_count, width, height, new_format, swap_chain_flags);
+    }
+
     d3d12->m_display_width = width;
     d3d12->m_display_height = height;
 
@@ -614,6 +666,78 @@ HRESULT WINAPI D3D12Hook::resize_buffers(IDXGISwapChain3* swap_chain, UINT buffe
     --g_resize_buffers_depth;
 
     return result;
+}
+
+thread_local int32_t g_dxgi_resize_depth = 0;
+
+// A RESIZE, CAUGHT AT DXGI'S OWN FUNCTION, whoever calls it and however. The vtable hook on the swapchain we present
+// (resize_buffers) sees only calls through that swapchain's vtable, and only ResizeBuffers: a swapchain wrapper may come
+// another way -- STALKER 2's XeSS frame generation calls ResizeBuffers1 whenever Streamline's DLSS-G is not loaded. Our
+// back buffer references then outlive the resize, and it fails with DXGI_ERROR_INVALID_CALL, which is fatal in Unreal.
+// So on our swapchain they are let go of first; any other swapchain is passed on untouched. Said every time -- a resize
+// is rare, and the caller names the path.
+HRESULT D3D12Hook::resize_in_dxgi(IDXGISwapChain3* swap_chain, UINT width, UINT height, const char* name, uintptr_t caller, const std::function<HRESULT()>& call) {
+    std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
+
+    auto d3d12 = g_d3d12_hook;
+    const auto hooked = d3d12->m_swapchain_hook != nullptr ? d3d12->m_swapchain_hook->get_instance().ptr() : nullptr;
+    const auto ours = swap_chain == d3d12->m_swap_chain || (void*)swap_chain == hooked;
+
+    HWND swapchain_wnd{nullptr};
+    swap_chain->GetHwnd(&swapchain_wnd);
+
+    if (ours && !WindowFilter::get().is_filtered(swapchain_wnd)) {
+        spdlog::info("{} {}x{} on our swapchain, called from {}: our back buffers are let go of first", name, width, height,
+            describe_address(caller));
+
+        d3d12->m_display_width = width;
+        d3d12->m_display_height = height;
+
+        if (d3d12->m_on_resize_buffers) {
+            d3d12->m_on_resize_buffers(*d3d12, width, height);
+        }
+    } else {
+        spdlog::info("{} on another swapchain {:x}, called from {}: passed on", name, (uintptr_t)swap_chain, describe_address(caller));
+    }
+
+    ++g_dxgi_resize_depth;
+    const auto result = call();
+    --g_dxgi_resize_depth;
+
+    if (result != S_OK) {
+        spdlog::error("{} failed: {:x}", name, (uint32_t)result);
+    }
+
+    return result;
+}
+
+// dxgi's ResizeBuffers. Nested in our own call, or under the vtable hook standing in for a dxgi hook that could not be
+// put on (it has let go of our back buffers already), it passes straight on.
+HRESULT WINAPI D3D12Hook::resize_buffers_dxgi(IDXGISwapChain3* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags) {
+    auto& hook = g_d3d12_hook->m_resize_buffers_dxgi_hook;
+
+    if (g_resize_buffers_depth > 0 || g_dxgi_resize_depth > 0) {
+        return hook.unsafe_call<HRESULT>(swap_chain, buffer_count, width, height, new_format, swap_chain_flags);
+    }
+
+    return resize_in_dxgi(swap_chain, width, height, "ResizeBuffers", (uintptr_t)_ReturnAddress(), [&]() {
+        return hook.unsafe_call<HRESULT>(swap_chain, buffer_count, width, height, new_format, swap_chain_flags);
+    });
+}
+
+// dxgi's ResizeBuffers1, the same way.
+HRESULT WINAPI D3D12Hook::resize_buffers1_dxgi(IDXGISwapChain3* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags,
+    const UINT* creation_node_mask, IUnknown* const* present_queue)
+{
+    auto& hook = g_d3d12_hook->m_resize_buffers1_dxgi_hook;
+
+    if (g_resize_buffers_depth > 0 || g_dxgi_resize_depth > 0) {
+        return hook.unsafe_call<HRESULT>(swap_chain, buffer_count, width, height, new_format, swap_chain_flags, creation_node_mask, present_queue);
+    }
+
+    return resize_in_dxgi(swap_chain, width, height, "ResizeBuffers1", (uintptr_t)_ReturnAddress(), [&]() {
+        return hook.unsafe_call<HRESULT>(swap_chain, buffer_count, width, height, new_format, swap_chain_flags, creation_node_mask, present_queue);
+    });
 }
 
 thread_local int32_t g_resize_target_depth = 0;

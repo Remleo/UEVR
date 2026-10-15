@@ -9,6 +9,8 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 
+#include <safetyhook.hpp>
+
 #include "utility/PointerHook.hpp"
 #include "utility/VtableHook.hpp"
 
@@ -129,6 +131,11 @@ protected:
     std::unique_ptr<VtableHook> m_swapchain_hook{};
     //std::unique_ptr<FunctionHook> m_create_swap_chain_hook{};
 
+    // dxgi's own ResizeBuffers and ResizeBuffers1, where every resize lets go of our back buffers (resize_in_dxgi);
+    // m_swapchain_hook's ResizeBuffers stands in where they could not be put on.
+    safetyhook::InlineHook m_resize_buffers_dxgi_hook{};
+    safetyhook::InlineHook m_resize_buffers1_dxgi_hook{};
+
     OnPresentFn m_on_present{ nullptr };
     OnPresentFn m_on_post_present{ nullptr };
     OnResizeBuffersFn m_on_resize_buffers{ nullptr };
@@ -141,6 +148,10 @@ protected:
     static HRESULT WINAPI present1(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags, DXGI_PRESENT_PARAMETERS* params);
     static HRESULT WINAPI resize_buffers(IDXGISwapChain3* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags);
     static HRESULT WINAPI resize_target(IDXGISwapChain3* swap_chain, const DXGI_MODE_DESC* new_target_parameters);
+    static HRESULT WINAPI resize_buffers_dxgi(IDXGISwapChain3* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags);
+    static HRESULT WINAPI resize_buffers1_dxgi(IDXGISwapChain3* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags,
+        const UINT* creation_node_mask, IUnknown* const* present_queue);
+    static HRESULT resize_in_dxgi(IDXGISwapChain3* swap_chain, UINT width, UINT height, const char* name, uintptr_t caller, const std::function<HRESULT()>& call);
     //static HRESULT WINAPI create_swap_chain(IDXGIFactory4* factory, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC* desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* p_fullscreen_desc, IDXGIOutput* p_restrict_to_output, IDXGISwapChain** swap_chain);
 };
 
