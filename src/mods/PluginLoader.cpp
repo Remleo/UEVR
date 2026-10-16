@@ -1403,6 +1403,21 @@ void set_ui_plane_held(unsigned int plane, bool held) {
     VR::get()->get_overlay_component().set_plane_held((size_t)plane, held);
 }
 
+// Said on every change: a take or a release of the weapon, rare, and the log then shows what the aim was turned from.
+void set_two_handed_aim_offset(const UEVR_Vector3f* offset) {
+    if (offset == nullptr || (offset->x == 0.0f && offset->y == 0.0f && offset->z == 0.0f)) {
+        if (VR::get()->get_two_handed_aim_offset().has_value()) {
+            spdlog::info("[VR] Two-handed aim: the offset is taken away, the aim follows the line between the controllers");
+        }
+
+        VR::get()->set_two_handed_aim_offset(std::nullopt);
+        return;
+    }
+
+    spdlog::info("[VR] Two-handed aim: the other hand took hold at {:.3f} {:.3f} {:.3f} of the leading one", offset->x, offset->y, offset->z);
+    VR::get()->set_two_handed_aim_offset(glm::vec3{offset->x, offset->y, offset->z});
+}
+
 // TODO: Optimize this with a map
 void set_mod_value(const char* key, const char* value) {
     if (key == nullptr || value == nullptr) {
@@ -1598,6 +1613,7 @@ UEVR_VRData g_vr_data {
     .get_smoothed_aim_rotation = uevr::vr::get_smoothed_aim_rotation,
     .set_camera_freeze = uevr::vr::set_camera_freeze,
     .set_ui_plane_held = uevr::vr::set_ui_plane_held,
+    .set_two_handed_aim_offset = uevr::vr::set_two_handed_aim_offset,
 };
 
 

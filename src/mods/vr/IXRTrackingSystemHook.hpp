@@ -39,6 +39,11 @@ public:
         glm::quat aim_view_base{glm::identity<glm::quat>()};
         bool aim_view_base_valid{false};
         bool was_called{false};
+
+        // The turn a two-handed aim with an offset last gave, and the offset it was taken under: a new offset starts
+        // from no turn, and hands too near to give a line keep this one.
+        glm::vec3 two_handed_offset{};
+        glm::quat two_handed_turn{glm::identity<glm::quat>()};
     };
 
 public:

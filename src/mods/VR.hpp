@@ -737,6 +737,19 @@ public:
         apply(rotation, m_camera_freeze.rotation_wants_freeze, m_camera_freeze.rotation_frozen);
     }
 
+    // Where the other hand took hold, for a two-handed aim method (the API's set_two_handed_aim_offset): its grip
+    // position relative to the leading hand's, in the leading hand's aim frame. Empty is the stock aim along the line
+    // between the controllers.
+    void set_two_handed_aim_offset(std::optional<glm::vec3> offset) {
+        std::unique_lock _{m_two_handed_aim.mtx};
+        m_two_handed_aim.offset = offset;
+    }
+
+    std::optional<glm::vec3> get_two_handed_aim_offset() const {
+        std::shared_lock _{m_two_handed_aim.mtx};
+        return m_two_handed_aim.offset;
+    }
+
     bool is_using_2d_screen() const {
         return m_2d_screen_mode->value();
     }
@@ -1205,6 +1218,11 @@ private:
         bool position_wants_freeze{false};
         bool rotation_wants_freeze{false};
     } m_camera_freeze{};
+
+    struct TwoHandedAim {
+        mutable std::shared_mutex mtx{};
+        std::optional<glm::vec3> offset{};
+    } m_two_handed_aim{};
 
     struct CameraLerp {
         glm::vec3 last_position{};

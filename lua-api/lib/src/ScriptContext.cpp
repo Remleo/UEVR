@@ -487,6 +487,9 @@ int ScriptContext::setup_bindings() {
         "set_camera_freeze", &UEVR_VRData::set_camera_freeze,
         // A UI plane kept where it hangs on the headset, roll included, for a menu brought up with the head tilted.
         "set_ui_plane_held", &UEVR_VRData::set_ui_plane_held,
+        // Where the other hand took hold, for a two-handed aim method: the aim then keeps that offset instead of
+        // pointing along the line between the controllers. A zero vector takes it away.
+        "set_two_handed_aim_offset", &UEVR_VRData::set_two_handed_aim_offset,
         "get_transform", &UEVR_VRData::get_transform,
         "get_eye_offset", &UEVR_VRData::get_eye_offset,
         "get_ue_projection_matrix", &UEVR_VRData::get_ue_projection_matrix,
