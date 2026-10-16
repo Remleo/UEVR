@@ -26,6 +26,9 @@
 #include <sdk/FBoolProperty.hpp>
 #include <sdk/FStructProperty.hpp>
 #include <sdk/FEnumProperty.hpp>
+#include <sdk/FObjectProperty.hpp>
+#include <sdk/FFieldClass.hpp>
+#include <sdk/UClass.hpp>
 #include <sdk/AActor.hpp>
 #include <sdk/UGameViewportClient.hpp>
 
@@ -499,6 +502,64 @@ UEVR_FFieldFunctions g_ffield_functions {
 
 #define FPROPERTY(x) ((sdk::FProperty*)x)
 
+namespace {
+// The class an object or class property holds, or null. A field class is the engine's static singleton, so its name is
+// read once; the class read is taken only as a live class, so a layout read wrong answers null.
+sdk::UClass* property_class_of(sdk::FProperty* prop) {
+    static std::mutex mtx{};
+    static std::unordered_map<const sdk::FFieldClass*, bool> holds_objects{};
+    static sdk::UClass* class_class{nullptr};
+
+    const auto field_class = prop != nullptr ? prop->get_class() : nullptr;
+
+    if (field_class == nullptr) {
+        return nullptr;
+    }
+
+    {
+        std::scoped_lock _{mtx};
+
+        // Kept only once found: asked too early it is not there yet.
+        if (class_class == nullptr) {
+            class_class = sdk::UClass::static_class();
+
+            if (class_class == nullptr) {
+                return nullptr;
+            }
+        }
+
+        auto it = holds_objects.find(field_class);
+
+        if (it == holds_objects.end()) {
+            const auto name = field_class->get_name().to_string();
+            const auto holds = name == L"ObjectProperty" || name == L"ObjectPtrProperty" || name == L"ClassProperty" ||
+                name == L"ClassPtrProperty";
+
+            it = holds_objects.emplace(field_class, holds).first;
+        }
+
+        if (!it->second) {
+            return nullptr;
+        }
+    }
+
+    const auto cls = ((sdk::FObjectProperty*)prop)->get_property_class();
+    const auto objects = (UEVR_UObjectArrayHandle)sdk::FUObjectArray::get();
+
+    if (!uevr::fuobjectarray::is_valid_object(objects, (UEVR_UObjectHandle)cls)) {
+        return nullptr;
+    }
+
+    const auto cls_class = cls->get_class();
+
+    if (cls_class == nullptr || !cls_class->is_a(class_class)) {
+        return nullptr;
+    }
+
+    return cls;
+}
+}
+
 UEVR_FPropertyFunctions g_fproperty_functions {
     // get_offset
     .get_offset = [](UEVR_FPropertyHandle prop) -> int {
@@ -521,6 +582,9 @@ UEVR_FPropertyFunctions g_fproperty_functions {
     },
     .is_pod = [](UEVR_FPropertyHandle prop) -> bool {
         return FPROPERTY(prop)->is_pod();
+    },
+    .get_property_class = [](UEVR_FPropertyHandle prop) -> UEVR_UClassHandle {
+        return (UEVR_UClassHandle)property_class_of(FPROPERTY(prop));
     },
 };
 

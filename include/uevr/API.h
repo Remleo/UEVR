@@ -320,6 +320,14 @@ typedef struct {
     void* (*get_objects_ptr)(UEVR_UObjectArrayHandle array);
     UEVR_UObjectHandle (*get_object)(UEVR_UObjectArrayHandle array, int index);
     UEVR_FUObjectItemHandle (*get_item)(UEVR_UObjectArrayHandle array, int index);
+
+    /* Whether `object` is a live object: the array's slot at the object's own index holds that very pointer. A pointer
+       kept past its object's end answers false, whatever its old memory holds now, and never faults -- the index is read
+       under SEH, in case the memory went back to the system. Null answers false.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    bool (*is_valid_object)(UEVR_UObjectArrayHandle array, UEVR_UObjectHandle object);
 } UEVR_UObjectArrayFunctions;
 
 typedef struct {
@@ -340,6 +348,13 @@ typedef struct {
     bool (*is_return_param)(UEVR_FPropertyHandle prop);
     bool (*is_reference_param)(UEVR_FPropertyHandle prop);
     bool (*is_pod)(UEVR_FPropertyHandle prop);
+
+    /* For an object or class property, the class its objects must be of; null for any other property, and when the
+       class read is not a live class (a layout this build could not be read for).
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    UEVR_UClassHandle (*get_property_class)(UEVR_FPropertyHandle prop);
 } UEVR_FPropertyFunctions;
 
 typedef struct {

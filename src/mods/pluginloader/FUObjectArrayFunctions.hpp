@@ -13,6 +13,7 @@ int get_object_count(UEVR_UObjectArrayHandle array);
 void* get_objects_ptr(UEVR_UObjectArrayHandle array);
 UEVR_UObjectHandle get_object(UEVR_UObjectArrayHandle array, int index);
 UEVR_FUObjectItemHandle get_item(UEVR_UObjectArrayHandle array, int index);
+bool is_valid_object(UEVR_UObjectArrayHandle array, UEVR_UObjectHandle object);
 
 extern UEVR_UObjectArrayFunctions functions;
 }

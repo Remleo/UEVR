@@ -726,6 +726,12 @@ public:
             return fn(to_handle());
         }
 
+        // For an object or class property, the class its objects must be of; null for any other property.
+        UClass* get_property_class() const {
+            static const auto fn = initialize()->get_property_class;
+            return (UClass*)fn(to_handle());
+        }
+
     private:
         static inline const UEVR_FPropertyFunctions* s_functions{nullptr};
         static inline const UEVR_FPropertyFunctions* initialize() {
@@ -1123,6 +1129,12 @@ public:
         FUObjectItem* get_item(int32_t index) const {
             static const auto fn = initialize()->get_item;
             return (FUObjectItem*)fn(to_handle(), index);
+        }
+
+        // Whether `object` is a live object: a pointer kept past its object's end answers false (see API.h).
+        bool is_valid_object(const UObject* object) const {
+            static const auto fn = initialize()->is_valid_object;
+            return fn(to_handle(), (UEVR_UObjectHandle)object);
         }
 
     private:
