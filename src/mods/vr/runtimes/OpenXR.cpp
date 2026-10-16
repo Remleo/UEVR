@@ -814,6 +814,18 @@ void OpenXR::capture_projection() {
     }
 }
 
+// Into the same record as the projection, keyed the same way, so a frame is shown where it was rendered for by the rule
+// that already holds for its cant.
+void OpenXR::capture_view_anchor(const std::optional<glm::quat>& head) {
+    std::scoped_lock _{ this->sync_assignment_mtx };
+
+    auto& state = this->pipeline_states[this->internal_frame_count % QUEUE_SIZE];
+
+    state.anchor_frame = this->internal_frame_count;
+    state.anchored = head.has_value();
+    state.anchor = head.value_or(glm::identity<glm::quat>());
+}
+
 OpenXR::PipelineState OpenXR::get_submit_state() {
     std::scoped_lock __{ this->sync_assignment_mtx };
 
@@ -854,6 +866,10 @@ OpenXR::PipelineState OpenXR::get_submit_state() {
             last_submit_state.view_bounds[eye][i] = best != nullptr ? best->view_bounds[eye][i] : this->view_bounds[eye][i];
         }
     }
+
+    // Held in the room only by the record of the frame itself: without one the frame goes out the usual way.
+    last_submit_state.anchored = best != nullptr && best->anchored && best->anchor_frame == best->projection_frame;
+    last_submit_state.anchor = last_submit_state.anchored ? best->anchor : glm::identity<glm::quat>();
 
     this->has_render_frame_count = false;
 
@@ -1853,6 +1869,22 @@ XrResult OpenXR::begin_frame() {
     return result;
 }
 
+// An eye's pose in the stage with the head turned to `head`: the head's position taken from the eye's stage pose, the
+// eye's own offset from the head (its view space pose, fixed geometry) turned with the head.
+static XrPosef eye_with_head_turned(const XrPosef& stage_eye, const XrPosef& view_eye, const glm::quat& head) {
+    const auto stage_rotation = OpenXR::to_glm(stage_eye.orientation);
+    const auto eye_rotation = OpenXR::to_glm(view_eye.orientation);
+    const auto eye_offset = glm::vec3{view_eye.position.x, view_eye.position.y, view_eye.position.z};
+    const auto head_now = glm::normalize(stage_rotation * glm::inverse(eye_rotation));
+    const auto head_position = glm::vec3{stage_eye.position.x, stage_eye.position.y, stage_eye.position.z} - head_now * eye_offset;
+
+    XrPosef pose{};
+    pose.orientation = OpenXR::to_openxr(glm::normalize(head * eye_rotation));
+    pose.position = OpenXR::to_openxr(head_position + head * eye_offset);
+
+    return pose;
+}
+
 XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& quad_layers, bool has_depth) {
     std::scoped_lock _{sync_mtx};
 
@@ -1918,7 +1950,17 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     //
     // The poses come from the view space locate, not the pipelined stage one: there a pose is the eye's offset
     // from the head, fixed hardware geometry that cannot go stale.
-    const auto head_locked_world = VR::get()->is_view_following_aim()
+    //
+    // HELD IN THE ROOM INSTEAD (View Follows Aim Anchor), the frame goes out in the stage after all, at the head's
+    // orientation it was rendered for: a turn of the stage fixed as the binding went on, times the camera the frame
+    // was rendered with (FFakeStereoRenderingHook.cpp, anchor_view_follows_aim). That pose is true of the image, so
+    // the compositor's correction at every refresh is right again -- the picture stays where the aim put it while the
+    // head turns, and only the aim moves it. Head locked, a picture filling the view turns with every turn of the
+    // head, presumably felt as the picture slipping against the head: the eyes turn against a head turn by reflex.
+    // Taken from the frame's own record only, so a frame rendered held in the room is shown in the room whatever the
+    // setting says by the time it is submitted.
+    const auto room_held_world = submit_state.anchored && this->views.size() >= pipelined_stage_views.size();
+    const auto head_locked_world = !room_held_world && VR::get()->is_view_following_aim()
                                    && this->views.size() >= pipelined_stage_views.size();
 
     // Reset size of end frame data containers to 0.
@@ -1982,7 +2024,11 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
 
             projection_layer_views[i].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
             // The field of view is the same in either space: it belongs to the projection, not to the pose.
-            projection_layer_views[i].pose = head_locked_world ? this->views[i].pose : pipelined_stage_views[i].pose;
+            if (room_held_world) {
+                projection_layer_views[i].pose = eye_with_head_turned(pipelined_stage_views[i].pose, this->views[i].pose, submit_state.anchor);
+            } else {
+                projection_layer_views[i].pose = head_locked_world ? this->views[i].pose : pipelined_stage_views[i].pose;
+            }
             projection_layer_views[i].fov = pipelined_stage_views[i].fov;
 
             // Canted: the picture was rendered yawed onto the middle of the eye's field, symmetric about it, so it is

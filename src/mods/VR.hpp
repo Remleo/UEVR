@@ -79,6 +79,12 @@ public:
         VERTICAL_MATCHED
     };
 
+    enum ViewFollowsAimAnchor : int32_t {
+        AIM_VIEW_AUTO,
+        AIM_VIEW_ON_HEAD,
+        AIM_VIEW_IN_ROOM,
+    };
+
     static const inline std::string s_action_pose = "/actions/default/in/Pose";
     static const inline std::string s_action_grip_pose = "/actions/default/in/GripPose";
     static const inline std::string s_action_trigger = "/actions/default/in/Trigger";
@@ -411,6 +417,15 @@ public:
     // picture at all and the horizon is whatever the game's camera has.
     bool is_aim_view_keeping_head_roll() const {
         return m_aim_view_keeps_head_roll->value();
+    }
+
+    // Where the picture is held while the view follows the aim. On the head it goes out head locked, and the
+    // compositor leaves it alone. In the room it goes out at the orientation it was rendered for, under a turn of the
+    // stage fixed as it got there, so the compositor holds it in place at every refresh: a head turn no longer moves
+    // it, only the aim does. Auto holds it in the room while a controller leads the aim and on the head otherwise --
+    // see anchor_view_follows_aim in FFakeStereoRenderingHook.cpp. OpenXR only; elsewhere it stays on the head.
+    ViewFollowsAimAnchor get_view_follows_aim_anchor() const {
+        return (ViewFollowsAimAnchor)m_view_follows_aim_anchor->value();
     }
 
     // Shrinks head rotation by the zoom factor, so magnification does not make the world move faster
@@ -1080,6 +1095,12 @@ private:
         "Matched",
     };
 
+    static const inline std::vector<std::string> s_view_follows_aim_anchor_names{
+        "Auto",
+        "Head",
+        "Room",
+    };
+
     const ModCombo::Ptr m_rendering_method{ ModCombo::create(generate_name("RenderingMethod"), s_rendering_method_names) };
     const ModCombo::Ptr m_synced_afr_method{ ModCombo::create(generate_name("SyncedSequentialMethod"), s_synced_afr_method_names, 1) };
     const ModToggle::Ptr m_extreme_compat_mode{ ModToggle::create(generate_name("ExtremeCompatibilityMode"), false, true) };
@@ -1153,6 +1174,7 @@ private:
     const ModToggle::Ptr m_view_follows_aim{ ModToggle::create(generate_name("ViewFollowsAim"), false) };
     const ModSlider::Ptr m_view_follows_aim_blend_time{ ModSlider::create(generate_name("ViewFollowsAimBlendTime"), 0.0f, 1.0f, 0.3f) };
     const ModToggle::Ptr m_aim_view_keeps_head_roll{ ModToggle::create(generate_name("AimViewKeepsHeadRoll"), false) };
+    const ModCombo::Ptr m_view_follows_aim_anchor{ ModCombo::create(generate_name("ViewFollowsAimAnchor"), s_view_follows_aim_anchor_names, AIM_VIEW_AUTO) };
     const ModSlider::Ptr m_world_scale{ ModSlider::create(generate_name("WorldScale"), 0.01f, 10.0f, 1.0f) };
     const ModSlider::Ptr m_depth_scale{ ModSlider::create(generate_name("DepthScale"), 0.01f, 1.0f, 1.0f) };
 
@@ -1287,6 +1309,7 @@ public:
             *m_view_follows_aim,
             *m_view_follows_aim_blend_time,
             *m_aim_view_keeps_head_roll,
+            *m_view_follows_aim_anchor,
             *m_world_scale,
             *m_depth_scale,
             *m_custom_z_near,

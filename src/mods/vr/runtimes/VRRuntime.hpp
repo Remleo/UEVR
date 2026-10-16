@@ -94,6 +94,11 @@ struct VRRuntime {
     virtual void capture_projection() {
     }
 
+    // Records where in the stage this game frame is to be shown, as the head's orientation it was rendered for, for the
+    // submit of that frame: View Follows Aim held in the room. nullopt for a frame shown the usual way.
+    virtual void capture_view_anchor(const std::optional<glm::quat>& head) {
+    }
+
     virtual Error update_input() {
         return Error::SUCCESS;
     }
