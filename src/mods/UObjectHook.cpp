@@ -1500,12 +1500,20 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
     //left_hand_rotation = glm::normalize(left_hand_rotation * left_hand_offset_q);
     auto left_hand_euler = glm::degrees(utility::math::euler_angles_from_steamvr(left_hand_rotation));
 
-    const auto head_rotation =  glm::normalize(vqi_norm * (rotation_offset * glm::quat{vr->get_rotation(0)}));
+    // WHILE THE VIEW FOLLOWS THE AIM what is pinned to the head goes where the eye is: on the game's camera, turned with
+    // the view, the head's offset and turn left out as the render leaves them (FFakeStereoRenderingHook.cpp). Where the
+    // headset really is stands off the eye by however far the head moved since the binding (roomscale is skipped
+    // meanwhile), and a head lamp there threw the shadows of the game's hands and weapon at the eye across the view; a
+    // light at the eye hides each shadow behind what casts it. The hands are measured from the standing origin, and stay.
+    const auto following_aim = vr->is_view_following_aim();
+    const auto head_position = following_aim ? (is_double ? glm::vec3{*view_d} : glm::vec3{*view_location}) : final_position;
+    const auto head_rotation = glm::normalize(vqi_norm * (rotation_offset *
+                               (following_aim ? vr->get_zoom_view_rotation() : glm::quat{vr->get_rotation(0)})));
     const auto head_euler = glm::degrees(utility::math::euler_angles_from_steamvr(head_rotation));
 
     update_motion_controller_components(
-        final_position, head_euler,
-        left_hand_position, left_hand_euler, 
+        head_position, head_euler,
+        left_hand_position, left_hand_euler,
         right_hand_position, right_hand_euler);
 
     sdk::TArray<sdk::UPrimitiveComponent*> overlapped_components{};
@@ -1666,7 +1674,7 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
 
         using Hand = MotionControllerStateBase::Hand;
         const auto& hand_rotation = state.hand != Hand::HMD ? (state.hand == Hand::RIGHT ? right_hand_rotation : left_hand_rotation) : head_rotation;
-        const auto& hand_position = state.hand != Hand::HMD ? (state.hand == Hand::RIGHT ? right_hand_position : left_hand_position) : final_position;
+        const auto& hand_position = state.hand != Hand::HMD ? (state.hand == Hand::RIGHT ? right_hand_position : left_hand_position) : head_position;
         const auto& hand_euler = state.hand != Hand::HMD ? (state.hand == Hand::RIGHT ? right_hand_euler : left_hand_euler) : head_euler;
 
         const auto adjusted_rotation = hand_rotation * glm::inverse(state.rotation_offset);
