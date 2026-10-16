@@ -487,6 +487,9 @@ int ScriptContext::setup_bindings() {
         "set_camera_freeze", &UEVR_VRData::set_camera_freeze,
         // A UI plane kept where it hangs on the headset, roll included, for a menu brought up with the head tilted.
         "set_ui_plane_held", &UEVR_VRData::set_ui_plane_held,
+        // Where the other hand took hold, for a two-handed aim method: the aim then keeps that offset instead of
+        // pointing along the line between the controllers. A zero vector takes it away.
+        "set_two_handed_aim_offset", &UEVR_VRData::set_two_handed_aim_offset,
         "get_transform", &UEVR_VRData::get_transform,
         "get_eye_offset", &UEVR_VRData::get_eye_offset,
         "get_ue_projection_matrix", &UEVR_VRData::get_ue_projection_matrix,
@@ -589,7 +592,10 @@ int ScriptContext::setup_bindings() {
                 return;
             }
 
-            self.set_secondary_ui_source((UEVR_UObjectHandle)obj.as<uevr::API::UObject*>());
+            const auto source = obj.as<uevr::API::UObject*>();
+
+            lua::utility::check_self(source, L"set_secondary_ui_source");
+            self.set_secondary_ui_source((UEVR_UObjectHandle)source);
         },
         // Resize the game's FLAT window so its client area is exactly this, and return what it actually became --
         // two values, width then height, both zero if the window could not be reached.
@@ -718,14 +724,28 @@ int ScriptContext::setup_bindings() {
         "static_class", [](sol::this_state s) -> sol::object {
             return sol::make_object(s, uevr::API::UObject::static_class());
         },
-        "get_fname", &uevr::API::UObject::get_fname,
+        // Everything that reads the object checks first that it is still alive (lua::utility::check_self); get_address
+        // does not, a dead object's address is how a script tells which one it was.
+        "get_fname", [](uevr::API::UObject& self) {
+            lua::utility::check_self(&self, L"get_fname");
+            return self.get_fname();
+        },
         "get_short_name", [](sol::this_state s, uevr::API::UObject& self) -> sol::object {
+            lua::utility::check_self(&self, L"get_short_name");
             const auto wstr = self.get_fname()->to_string();
             return sol::make_object(s, utility::narrow(wstr));
         },
-        "get_full_name", &uevr::API::UObject::get_full_name,
-        "is_a", &uevr::API::UObject::is_a,
+        "get_full_name", [](uevr::API::UObject& self) {
+            lua::utility::check_self(&self, L"get_full_name");
+            return self.get_full_name();
+        },
+        "is_a", [](uevr::API::UObject& self, uevr::API::UClass* cmp) {
+            lua::utility::check_self(&self, L"is_a");
+            return self.is_a(cmp);
+        },
         "as_class", [](sol::this_state s, uevr::API::UObject& self) -> sol::object {
+            lua::utility::check_self(&self, L"as_class");
+
             if (auto c = self.dcast<uevr::API::UClass>()) {
                 return sol::make_object(s, c);
             }
@@ -733,6 +753,8 @@ int ScriptContext::setup_bindings() {
             return sol::make_object(s, sol::lua_nil);
         },
         "as_struct", [](sol::this_state s, uevr::API::UObject& self) -> sol::object {
+            lua::utility::check_self(&self, L"as_struct");
+
             if (auto c = self.dcast<uevr::API::UStruct>()) {
                 return sol::make_object(s, c);
             }
@@ -740,6 +762,8 @@ int ScriptContext::setup_bindings() {
             return sol::make_object(s, sol::lua_nil);
         },
         "as_function", [](sol::this_state s, uevr::API::UObject& self) -> sol::object {
+            lua::utility::check_self(&self, L"as_function");
+
             if (auto c = self.dcast<uevr::API::UFunction>()) {
                 return sol::make_object(s, c);
             }
@@ -747,6 +771,8 @@ int ScriptContext::setup_bindings() {
             return sol::make_object(s, sol::lua_nil);
         },
         "get_class", [](sol::this_state s, uevr::API::UObject& self) -> sol::object {
+            lua::utility::check_self(&self, L"get_class");
+
             auto c = self.get_class();
 
             if (c == nullptr) {
@@ -756,6 +782,8 @@ int ScriptContext::setup_bindings() {
             return sol::make_object(s, c);
         },
         "get_outer", [](sol::this_state s, uevr::API::UObject& self) -> sol::object {
+            lua::utility::check_self(&self, L"get_outer");
+
             auto c = self.get_outer();
 
             if (c == nullptr) {
@@ -764,23 +792,32 @@ int ScriptContext::setup_bindings() {
 
             return sol::make_object(s, c);
         },
-        "get_bool_property", &uevr::API::UObject::get_bool_property,
+        "get_bool_property", [](uevr::API::UObject& self, const std::wstring& name) {
+            lua::utility::check_self(&self, name);
+            return self.get_bool_property(name);
+        },
         "get_float_property", [](uevr::API::UObject& self, const std::wstring& name) {
+            lua::utility::check_self(&self, name);
             return self.get_property<float>(name);
         },
         "get_double_property", [](uevr::API::UObject& self, const std::wstring& name) {
+            lua::utility::check_self(&self, name);
             return self.get_property<double>(name);
         },
         "get_int_property", [](uevr::API::UObject& self, const std::wstring& name) {
+            lua::utility::check_self(&self, name);
             return self.get_property<int32_t>(name);
         },
         "get_uint_property", [](uevr::API::UObject& self, const std::wstring& name) {
+            lua::utility::check_self(&self, name);
             return self.get_property<uint32_t>(name);
         },
         "get_fname_property", [](uevr::API::UObject& self, const std::wstring& name) {
+            lua::utility::check_self(&self, name);
             return self.get_property<uevr::API::FName>(name);
         },
         "get_uobject_property", [](uevr::API::UObject& self, const std::wstring& name) {
+            lua::utility::check_self(&self, name);
             return self.get_property<uevr::API::UObject*>(name);
         },
         "get_property", [](sol::this_state s, uevr::API::UObject* self, const std::wstring& name) -> sol::object {
@@ -1147,6 +1184,8 @@ int ScriptContext::setup_bindings() {
         },
         //"get_or_add_motion_controller_state", &uevr::API::UObjectHook::get_or_add_motion_controller_state,
         "get_or_add_motion_controller_state", [](sol::this_state s, API::UObject* obj) -> sol::object {
+            lua::utility::check_self(obj, L"get_or_add_motion_controller_state");
+
             auto state = API::UObjectHook::get_or_add_motion_controller_state(obj);
 
             if (state == nullptr) {
@@ -1222,6 +1261,9 @@ int ScriptContext::setup_bindings() {
             return sol::make_object(s, pawn);
         },
         "spawn_object", [](sol::this_state s, uevr::API* api, API::UClass* klass, API::UObject* outer) -> sol::object {
+            lua::utility::check_self(klass, L"spawn_object");
+            lua::utility::check_self(outer, L"spawn_object");
+
             auto obj = api->spawn_object(klass, outer);
 
             if (obj == nullptr) {
@@ -1235,6 +1277,9 @@ int ScriptContext::setup_bindings() {
             if (deferred_obj.is<bool>()) {
                 deferred = deferred_obj.as<bool>();
             }
+
+            lua::utility::check_self(actor, L"add_component_by_class");
+            lua::utility::check_self(klass, L"add_component_by_class");
 
             auto comp = api->add_component_by_class(actor, klass, deferred);
 

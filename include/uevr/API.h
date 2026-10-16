@@ -320,6 +320,14 @@ typedef struct {
     void* (*get_objects_ptr)(UEVR_UObjectArrayHandle array);
     UEVR_UObjectHandle (*get_object)(UEVR_UObjectArrayHandle array, int index);
     UEVR_FUObjectItemHandle (*get_item)(UEVR_UObjectArrayHandle array, int index);
+
+    /* Whether `object` is a live object: the array's slot at the object's own index holds that very pointer. A pointer
+       kept past its object's end answers false, whatever its old memory holds now, and never faults -- the index is read
+       under SEH, in case the memory went back to the system. Null answers false.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    bool (*is_valid_object)(UEVR_UObjectArrayHandle array, UEVR_UObjectHandle object);
 } UEVR_UObjectArrayFunctions;
 
 typedef struct {
@@ -340,6 +348,13 @@ typedef struct {
     bool (*is_return_param)(UEVR_FPropertyHandle prop);
     bool (*is_reference_param)(UEVR_FPropertyHandle prop);
     bool (*is_pod)(UEVR_FPropertyHandle prop);
+
+    /* For an object or class property, the class its objects must be of; null for any other property, and when the
+       class read is not a live class (a layout this build could not be read for).
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    UEVR_UClassHandle (*get_property_class)(UEVR_FPropertyHandle prop);
 } UEVR_FPropertyFunctions;
 
 typedef struct {
@@ -730,6 +745,25 @@ typedef struct {
        Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
        plugins built against an older header. */
     void (*set_ui_plane_held)(unsigned int plane, bool held);
+
+    /* For a two-handed aim method: where the other hand took hold. The other controller's GRIP position relative to the
+       leading controller's grip position, in the leading controller's AIM frame -- the runtime's space, metres. The
+       leading hand is the right one under TWO_HANDED_RIGHT, the left one under TWO_HANDED_LEFT. Null or a zero vector
+       takes it away, and the method aims along the line between the controllers again.
+
+       WHY. The stock two-handed aim points along the line from one controller to the other, so the other hand has to
+       sit exactly on the barrel's line, and a hand taking a foregrip anywhere else swings the aim at the take. With the
+       offset the aim is the leading hand's own, turned by the shortest arc that brings the other hand back to where it
+       took hold: nothing turns at the take, the leading hand keeps its roll, and from then on the aim follows both
+       hands. It is taken in the frame UObjectHook pins things in -- grip position, aim rotation -- so a script turning
+       a pinned weapon the same way keeps the barrel and the aim together. Hands nearer than 8 cm keep the last turn.
+
+       A two-handed method is a method of its own: where the movement orientation names the same controller as a
+       one-handed aim, switching to it starts the stick being turned by that controller as well.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    void (*set_two_handed_aim_offset)(const UEVR_Vector3f* offset);
 } UEVR_VRData;
 
 struct lua_State;

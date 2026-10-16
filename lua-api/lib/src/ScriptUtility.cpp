@@ -1,6 +1,8 @@
 #include <format>
 #include <string>
 #include <cstdint>
+#include <mutex>
+#include <unordered_set>
 
 #include <utility/String.hpp>
 
@@ -45,6 +47,77 @@ bool is_ue5() {
     }();
     
     return cached_result;
+}
+
+// An object from a script is checked before it is used: a script may keep a pointer past its object's end, and the
+// engine takes it for the object. A failed check is a Lua error, so nothing reaches the engine, plus one warning line per
+// text, since a script's pcall may swallow the error.
+namespace {
+void warn_once(const std::string& text) {
+    static std::mutex mtx{};
+    static std::unordered_set<std::string> said{};
+
+    {
+        std::scoped_lock _{mtx};
+
+        if (!said.insert(text).second) {
+            return;
+        }
+    }
+
+    uevr::API::get()->log_warn("[LuaVR] %s", text.c_str());
+}
+
+bool is_live(uevr::API::UObject* object) {
+    const auto objects = uevr::API::FUObjectArray::get();
+
+    return objects == nullptr || objects->is_valid_object(object);
+}
+
+[[noreturn]] void refuse_self(uevr::API::UObject* self, std::wstring_view key) {
+    const auto text = std::format("{}: asked of an object that is no longer alive (kept past its end?)", ::utility::narrow(key));
+
+    warn_once(text);
+    throw sol::error(std::format("{} ({:x})", text, (uintptr_t)self));
+}
+}
+
+void check_self(uevr::API::UObject* self, std::wstring_view key) {
+    if (self == nullptr || is_live(self)) {
+        return;
+    }
+
+    refuse_self(self, key);
+}
+
+void check_argument(uevr::API::UObject* object, uevr::API::UStruct* owner, uevr::API::FProperty* prop) {
+    if (object == nullptr) {
+        return;
+    }
+
+    const char* why = nullptr;
+
+    if (!is_live(object)) {
+        why = "is no longer alive (kept past its end?)";
+    } else if (prop != nullptr) {
+        // A new object at a freed one's address is alive; only the class it must be of tells it apart.
+        const auto wanted = prop->get_property_class();
+
+        if (wanted != nullptr && !object->is_a(wanted)) {
+            why = "is not of the class it must be of";
+        }
+    }
+
+    if (why == nullptr) {
+        return;
+    }
+
+    const auto owner_name = owner != nullptr ? ::utility::narrow(owner->get_fname()->to_string()) : std::string{"?"};
+    const auto prop_name = prop != nullptr ? ::utility::narrow(prop->get_fname()->to_string()) : std::string{"?"};
+    const auto text = std::format("{}.{}: the object handed over {}", owner_name, prop_name, why);
+
+    warn_once(text);
+    throw sol::error(std::format("{} ({:x})", text, (uintptr_t)object));
 }
 
 sol::object prop_to_object(sol::this_state s, void* self, uevr::API::FProperty* desc, bool is_self_temporary) {
@@ -265,6 +338,8 @@ sol::object prop_to_object(sol::this_state s, void* self, uevr::API::UStruct* c,
 }
 
 sol::object prop_to_object(sol::this_state s, uevr::API::UObject* self, const std::wstring& name) {
+    check_self(self, name);
+
     const auto c = self->get_class();
 
     if (c == nullptr) {
@@ -402,11 +477,21 @@ void set_property(sol::this_state s, void* self, uevr::API::UStruct* owner_c, ue
         return;
     case L"InterfaceProperty"_fnv:
     case L"ObjectProperty"_fnv:
-        *(uevr::API::UObject**)((uintptr_t)self + offset) = value.as<uevr::API::UObject*>();
+    {
+        const auto object = value.as<uevr::API::UObject*>();
+
+        check_argument(object, owner_c, desc);
+        *(uevr::API::UObject**)((uintptr_t)self + offset) = object;
         return;
+    }
     case L"ClassProperty"_fnv:
-        *(uevr::API::UClass**)((uintptr_t)self + offset) = value.as<uevr::API::UClass*>();
+    {
+        const auto cls = value.as<uevr::API::UClass*>();
+
+        check_argument(cls, owner_c, desc);
+        *(uevr::API::UClass**)((uintptr_t)self + offset) = cls;
         return;
+    }
     case L"ArrayProperty"_fnv:
         throw sol::error("Setting array properties is not supported (yet)");
     case L"StrProperty"_fnv:
@@ -540,6 +625,8 @@ void set_property(sol::this_state s, void* self, uevr::API::UStruct* owner_c, ue
 }
 
 void set_property(sol::this_state s, uevr::API::UObject* self, const std::wstring& name, sol::object value, std::vector<std::unique_ptr<wchar_t[]>>* dynamic_strings) {
+    check_self(self, name);
+
     const auto c = self->get_class();
 
     if (c == nullptr) {
@@ -550,6 +637,13 @@ void set_property(sol::this_state s, uevr::API::UObject* self, const std::wstrin
 }
 
 sol::object call_function(sol::this_state s, uevr::API::UObject* self, uevr::API::UFunction* fn, sol::variadic_args args) {
+    // The function first, a blueprint's goes with its class; then what it is called on, named by the function.
+    check_self(fn, L"a function called");
+
+    if (self != nullptr && !is_live(self)) {
+        refuse_self(self, fn->get_fname()->to_string());
+    }
+
     const auto fn_args = fn->get_child_properties();
 
     if (fn_args == nullptr) {
@@ -690,6 +784,7 @@ sol::object call_function(sol::this_state s, uevr::API::UObject* self, uevr::API
 
                         for (size_t i = 0; i < arg_table.size(); ++i) {
                             dynamic_arr[i] = arg_table[i + 1];
+                            check_argument(dynamic_arr[i], fn, inner_prop);
                         }
 
                         arr.count = dynamic_arr.size();
@@ -820,6 +915,8 @@ sol::object call_function(sol::this_state s, uevr::API::UObject* self, uevr::API
 }
 
 sol::object call_function(sol::this_state s, uevr::API::UObject* self, const std::wstring& name, sol::variadic_args args) {
+    check_self(self, name);
+
     const auto c = self->get_class();
 
     if (c == nullptr) {

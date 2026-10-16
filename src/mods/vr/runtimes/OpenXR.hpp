@@ -91,6 +91,7 @@ struct OpenXR final : public VRRuntime {
 
     VRRuntime::Error update_matrices(float nearz, float farz) override;
     void capture_projection() override;
+    void capture_view_anchor(const std::optional<glm::quat>& head) override;
     VRRuntime::Error update_input() override;
 
     void destroy() override;
@@ -225,6 +226,12 @@ public:
         float canted_left[2]{};
         float canted_right[2]{};
         float view_bounds[2][4]{};
+
+        // The head's orientation in the stage the frame was rendered for, while View Follows Aim holds the picture in
+        // the room (capture_view_anchor). Valid only when anchor_frame is projection_frame.
+        uint32_t anchor_frame{0};
+        bool anchored{false};
+        glm::quat anchor{glm::identity<glm::quat>()};
     };
     /*std::array<std::vector<XrView>, 3> stage_view_queue{};
     std::array<XrSpaceLocation, 3> view_space_location_queue{};

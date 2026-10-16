@@ -4919,17 +4919,75 @@ constexpr float VIEW_BLEND_REBASE_WINDOW = 0.1f;
 
 ViewFollowsAimBlend g_view_follows_aim_blend{};
 
+// THE PICTURE HELD IN THE ROOM (VR_ViewFollowsAimAnchor), as the stage sees it. While the view follows the aim the head
+// takes no part in the picture, so the head orientation a frame was rendered for is not the headset's but this: a turn
+// of the stage fixed as the picture got there, times the frame's own camera. The turn is taken so that the first such
+// frame stands exactly where the head is, and it does not change while the picture is held, so the game world keeps one
+// orientation in the stage: the compositor's correction for the head is then true of every frame, and only the aim
+// moves the picture. With no zoom the world itself stands still and only the frame's edge travels with the aim.
+// Measured against the picture on the head in a timed trial (STALKER 2, a rifle held by both hands through a scope, the
+// head turning along with the aim): on the head a fine jitter, in the room much steadier.
+struct ViewHeldInRoom {
+    // Held in the room on the last frame.
+    bool active{false};
+
+    // The stage's orientation over the render's camera: a frame rendered with camera C is shown at world * C.
+    glm::quat world{glm::identity<glm::quat>()};
+
+    // This frame's head, taken on the first eye and used for the second.
+    std::optional<glm::quat> head{};
+};
+
+ViewHeldInRoom g_view_held_in_room{};
+
+// AUTO holds the picture in the room while a controller leads the aim: the aim is then a direction in the room, and the
+// picture is held along it. Where the game or a mouse leads there is no such direction, and a picture held in the room
+// would drift away from the head with every turn of the camera, so there it stays on the head. Auto goes over to the
+// room on the binding's first frame, the view's own blend and any blend of the projection still to come, and stays
+// there to the end of the binding: going over is seamless on any frame, coming back is not. Not after those blends: on
+// the head through them, any head turn in their 0.3 s read as a hard jerk -- worse than the little a projection
+// blending in the stage pulls.
+//
+// `camera` is the rotation this frame renders with before the eye's own turn, `head` the headset's orientation in the
+// stage. Records where the frame is to be shown, for its submit.
+void anchor_view_follows_aim(const std::shared_ptr<VR>& vr, int true_index, const glm::quat& camera, const glm::quat& head) {
+    auto& a = g_view_held_in_room;
+
+    if (true_index == 0) {
+        const auto following = vr->is_view_following_aim();
+        const auto anchor = vr->get_view_follows_aim_anchor();
+        auto wanted = following && anchor == VR::AIM_VIEW_IN_ROOM;
+
+        if (following && anchor == VR::AIM_VIEW_AUTO) {
+            wanted = a.active || (vr->is_controller_aim_enabled() && vr->is_using_controllers());
+        }
+
+        if (wanted != a.active) {
+            spdlog::info("[VR] View Follows Aim: the picture is {}", wanted ? "held in the room" : "on the head again");
+        }
+
+        if (wanted && !a.active) {
+            a.world = glm::normalize(head * glm::inverse(camera));
+        }
+
+        a.active = wanted;
+        a.head = wanted ? std::optional<glm::quat>{glm::normalize(a.world * camera)} : std::nullopt;
+    }
+
+    vr->get_runtime()->capture_view_anchor(a.head);
+}
+
 struct ViewFollowsAimBlendResult {
     glm::quat rotation{glm::identity<glm::quat>()};
     float height{0.0f};
 };
 
 // `vqi_full` is the game camera's rotation, `vqi_norm` the one the view is built on (flattened under decoupled
-// pitch), `head` the head's rotation the view takes, `height` the head's height above the standing origin.
-// Returns the rotation to put in front of vqi_norm and the height to add.
+// pitch), `head` the head's rotation the view takes, `headset` the headset's own orientation in the stage, `height`
+// the head's height above the standing origin. Returns the rotation to put in front of vqi_norm and the height to add.
 ViewFollowsAimBlendResult blend_view_follows_aim(const std::shared_ptr<VR>& vr, int true_index, const glm::quat& vqi_full,
-                                                 const glm::quat& vqi_norm, const glm::quat& head, float height,
-                                                 const glm::quat& rotation_offset) {
+                                                 const glm::quat& vqi_norm, const glm::quat& head, const glm::quat& headset,
+                                                 float height, const glm::quat& rotation_offset) {
     auto& b = g_view_follows_aim_blend;
     const auto relative_now = glm::normalize(glm::inverse(vqi_full) * vqi_norm * head);
 
@@ -4956,7 +5014,16 @@ ViewFollowsAimBlendResult blend_view_follows_aim(const std::shared_ptr<VR>& vr, 
         b.last_offset = rotation_offset;
 
         if (b.known && following != b.following && blend_time > 0.0f) {
-            b.correction = glm::normalize(b.shown_relative * glm::inverse(relative_now));
+            // LET GO OF A PICTURE HELD IN THE ROOM, the view starts from the world as it was held, seen from where the
+            // headset is: that picture stood where the aim put it, so carried onto the head as it was the whole world
+            // would jump by however far the head was off it.
+            if (!following && g_view_held_in_room.active) {
+                b.correction = glm::normalize(glm::inverse(vqi_full) * glm::inverse(g_view_held_in_room.world) * headset *
+                                              glm::inverse(relative_now));
+            } else {
+                b.correction = glm::normalize(b.shown_relative * glm::inverse(relative_now));
+            }
+
             b.height_correction = b.shown_height - height;
             b.started = now;
             b.switched = now;
@@ -5191,7 +5258,8 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         // shrinks it again. Attachments are left alone for the reverse reason -- hands belong where the
         // hands are. So zoom fits game or controller aiming; with head aiming the camera follows the
         // head at full speed while the view takes a fraction, and the two fight.
-        const auto scaled_head_rotation = vr->apply_zoom_to_head_rotation(glm::quat{vr->get_rotation(0)});
+        const auto headset_rotation = glm::quat{vr->get_rotation(0)};
+        const auto scaled_head_rotation = vr->apply_zoom_to_head_rotation(headset_rotation);
         const auto current_hmd_rotation = glm::normalize(rotation_offset * scaled_head_rotation);
         const auto current_eye_rotation_offset = glm::normalize(glm::quat{vr->get_eye_transform(true_index)});
 
@@ -5207,11 +5275,14 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                               : vr->get_position(0) - vr->get_standing_origin();
 
         const auto follow_blend = blend_view_follows_aim(vr, true_index, vqi_full, vqi_norm, current_hmd_rotation,
-                                                         standing_delta.y, rotation_offset);
+                                                         headset_rotation, standing_delta.y, rotation_offset);
 
         standing_delta.y += follow_blend.height;
 
-        const auto new_rotation = glm::normalize(follow_blend.rotation * vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
+        const auto camera_rotation = glm::normalize(follow_blend.rotation * vqi_norm * current_hmd_rotation);
+        const auto new_rotation = glm::normalize(camera_rotation * current_eye_rotation_offset);
+
+        anchor_view_follows_aim(vr, true_index, camera_rotation, headset_rotation);
         const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
 
         const auto standing_delta_flat = glm::vec3{standing_delta.x, 0, standing_delta.z};

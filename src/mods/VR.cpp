@@ -2787,6 +2787,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 ImGui::SetTooltip("Only with View Follows Aim. The aim keeps where the view looks, and tilting the head still tilts the world. Off, the head has no say in the picture and the horizon stays level whatever the head does.");
             }
 
+            m_view_follows_aim_anchor->draw("View Follows Aim Anchor");
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Only with View Follows Aim, OpenXR only. Head: the picture is fixed to the headset and turns with it. Room: the picture stays where the aim points and a head turn does not move it, as with a real scope; its edge shows when the head turns away from the aim. Auto: Room while a controller leads the aim, Head while the game or a mouse does.");
+            }
+
             ImGui::TreePop();
         }
 

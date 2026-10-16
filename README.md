@@ -19,6 +19,20 @@ links below, which all point to him.
 
 Newest first.
 
+- **A script can no longer crash the game with an object that is gone.** Every object a Lua script hands to the game is
+  checked first: one that was destroyed, or whose memory now holds something else, is refused with a Lua error and a
+  warning in the log, instead of crashing the game a moment later. The check costs about a ten-thousandth of the call it
+  guards.
+- **What is pinned to the headset stays at your eye while View Follows Aim is on**, so a head lamp no longer throws the
+  shadow of your hands and weapon across a scope.
+- **View Follows Aim holds the picture in the room while a controller aims.** Turning your head while you look through
+  a scope no longer makes the picture jitter. **View Follows Aim Anchor**: Auto (the default: in the room while a
+  controller aims, on the head while the game or a mouse does), Head or Room. OpenXR only.
+- **Two-handed aim from where the other hand takes hold**, for scripts and plugins (`set_two_handed_aim_offset`): the
+  other hand no longer has to sit on the barrel's line, and nothing jumps when it takes hold.
+- **No crash when a game resizes its window its own way.** STALKER 2 resizes it through XeSS frame generation whenever
+  DLSS Frame Generation is not available; UEVR missed that resize, and the game crashed a few seconds into loading a save.
+  Every resize is caught now, whoever makes it.
 - **Smooth switch between Raw and Canted.** When the projection changes while you play (a profile does it as you aim
   down the sights), the eyes turn over gradually instead of jumping by 7 degrees, with no fish-eye pull on the way:
   every frame reaches the headset with the projection it was rendered with. **Projection Blend Time**, 0.3 s by default;

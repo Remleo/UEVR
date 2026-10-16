@@ -1914,11 +1914,48 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
         glm::quat og_controller_rot{};
 
         const auto aim_type = (VR::AimMethod)vr->get_aim_method();
+        const auto two_handed = aim_type == VR::AimMethod::TWO_HANDED_RIGHT || aim_type == VR::AimMethod::TWO_HANDED_LEFT;
+        const auto two_handed_offset = two_handed ? vr->get_two_handed_aim_offset() : std::nullopt;
 
         if (aim_type == VR::AimMethod::RIGHT_CONTROLLER || aim_type == VR::AimMethod::LEFT_CONTROLLER) {
             const auto controller_index = aim_type == VR::AimMethod::RIGHT_CONTROLLER ? vr->get_right_controller_index() : vr->get_left_controller_index();
             og_controller_rot = glm::quat{vr->get_aim_rotation(controller_index)};
             og_controller_pos = glm::vec3{vr->get_aim_position(controller_index)};
+            right_controller_forward = og_controller_rot * glm::vec3{0.0f, 0.0f, 1.0f};
+        } else if (two_handed_offset.has_value()) {
+            // THE LEADING HAND'S OWN AIM, turned by the shortest arc that brings the other hand back to where it took
+            // hold (set_two_handed_aim_offset). In the frame UObjectHook pins in -- grip positions, the aim rotation --
+            // so a weapon pinned there and turned the same way by a script points where this aims.
+            const auto right_index = vr->get_right_controller_index();
+            const auto left_index = vr->get_left_controller_index();
+            const auto lead_index = aim_type == VR::AimMethod::TWO_HANDED_RIGHT ? right_index : left_index;
+            const auto other_index = aim_type == VR::AimMethod::TWO_HANDED_RIGHT ? left_index : right_index;
+            const auto lead_rot = glm::quat{vr->get_aim_rotation(lead_index)};
+            const auto from = lead_rot * *two_handed_offset;
+            const auto to = glm::vec3{vr->get_grip_position(other_index) - vr->get_grip_position(lead_index)};
+
+            auto& data = m_process_view_rotation_data;
+
+            if (data.two_handed_offset != *two_handed_offset) {
+                data.two_handed_offset = *two_handed_offset;
+                data.two_handed_turn = glm::identity<glm::quat>();
+            }
+
+            // Hands nearer than 8 cm give no line worth following, and an other hand straight behind where it took hold
+            // gives no single shortest arc: the last turn holds through both.
+            if (glm::length(to) >= 0.08f && glm::length(from) >= 1e-6f) {
+                const auto a = glm::normalize(from);
+                const auto b = glm::normalize(to);
+                const auto w = 1.0f + glm::dot(a, b);
+
+                if (w >= 1e-6f) {
+                    const auto c = glm::cross(a, b);
+                    data.two_handed_turn = glm::normalize(glm::quat{w, c.x, c.y, c.z});
+                }
+            }
+
+            og_controller_rot = glm::normalize(data.two_handed_turn * lead_rot);
+            og_controller_pos = glm::vec3{vr->get_aim_position(lead_index)};
             right_controller_forward = og_controller_rot * glm::vec3{0.0f, 0.0f, 1.0f};
         } else if (aim_type == VR::AimMethod::TWO_HANDED_RIGHT) { // two handed modes are for imitating rifle aiming
             const auto right_controller_index = vr->get_right_controller_index();

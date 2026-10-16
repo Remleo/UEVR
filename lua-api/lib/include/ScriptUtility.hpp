@@ -7,6 +7,12 @@ namespace lua::utility {
     uevr::API::UScriptStruct* get_vector_struct();
     bool is_ue5();
 
+    // Throws unless `self` is a live object; `key` names what was asked of it. Null passes.
+    void check_self(uevr::API::UObject* self, std::wstring_view key);
+
+    // Throws unless `object`, handed over for `prop` of `owner`, is a live object of the class `prop` holds. Null passes.
+    void check_argument(uevr::API::UObject* object, uevr::API::UStruct* owner, uevr::API::FProperty* prop);
+
     sol::object prop_to_object(sol::this_state s, void* self, uevr::API::FProperty* desc, bool is_self_temporary = false);
     sol::object prop_to_object(sol::this_state s, void* self, uevr::API::UStruct* desc, const std::wstring& name);
     sol::object prop_to_object(sol::this_state s, uevr::API::UObject* self, const std::wstring& name);
@@ -57,11 +63,13 @@ namespace lua::utility {
 
     template <typename T>
     void write_t(uevr::API::UObject* self, size_t offset, T value) {
+        check_self(self, L"write");
         write_t_struct<T>(self, self->get_class(), offset, value);
     }
 
     template<typename T>
     T read_t(uevr::API::UObject* self, size_t offset) {
+        check_self(self, L"read");
         return read_t_struct<T>(self, self->get_class(), offset);
     }
 }
