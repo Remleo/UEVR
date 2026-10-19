@@ -155,6 +155,7 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count) 
         }
 
         this->frame_state = local_frame_state;
+        this->waited_frame_state = local_frame_state;
 
         // Initialize all the existing frame states if they aren't already so we don't get some random error when calling xrEndFrame
         for (auto& pipeline_state : this->pipeline_states) {
@@ -1929,6 +1930,27 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     const auto& pipelined_stage_views = submit_state.stage_views;
     const auto& pipelined_frame_state = submit_state.frame_state;
 
+    // The frame xrBeginFrame began is the one xrWaitFrame last returned, and xrEndFrame ends it with that frame's time and
+    // its word on whether layers go out; the poses stay the rendered frame's. The rendered frame's pipeline slot can hold
+    // another frame's state: on STALKER 2 under SteamVR it was 20..180 ms older on 10..12 submits a second, SteamVR
+    // refused each (XR_ERROR_TIME_INVALID) and dropped the frame, and play stuttered; VDXR takes any time.
+    const auto& begun_frame_state = this->waited_frame_state.predictedDisplayTime != 0 ? this->waited_frame_state : pipelined_frame_state;
+
+    ++this->submits_counted;
+
+    if (pipelined_frame_state.predictedDisplayTime != begun_frame_state.predictedDisplayTime) {
+        ++this->stale_slot_submits;
+    }
+
+    if (this->submits_counted >= 600) {
+        if (this->stale_slot_submits > 0) {
+            spdlog::info("[VR] {} of the last {} submits found the rendered frame's slot holding another display time than the frame begun", this->stale_slot_submits, this->submits_counted);
+        }
+
+        this->stale_slot_submits = 0;
+        this->submits_counted = 0;
+    }
+
     if (pipelined_stage_views.empty()) {
         spdlog::warn("[VR] No stage views to submit");
     }
@@ -2005,7 +2027,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
 
     // we CANT push the layers every time, it cause some layer error
     // in xrEndFrame, so we must only do it when shouldRender is true
-    if (pipelined_frame_state.shouldRender == XR_TRUE && !pipelined_stage_views.empty()) {
+    if (begun_frame_state.shouldRender == XR_TRUE && !pipelined_stage_views.empty()) {
         projection_layer_views.resize(pipelined_stage_views.size(), {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
         depth_layers.resize(projection_layer_views.size(), {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
 
@@ -2124,7 +2146,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     }
 
     XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
-    frame_end_info.displayTime = pipelined_frame_state.predictedDisplayTime != 0 ? pipelined_frame_state.predictedDisplayTime : this->frame_state.predictedDisplayTime;
+    frame_end_info.displayTime = begun_frame_state.predictedDisplayTime != 0 ? begun_frame_state.predictedDisplayTime : this->frame_state.predictedDisplayTime;
     frame_end_info.environmentBlendMode = this->blend_mode;
     frame_end_info.layerCount = (uint32_t)layers.size();
     frame_end_info.layers = layers.data();
@@ -2141,7 +2163,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
         spdlog::error("[VR] xrEndFrame failed: {}", this->get_result_string(result));
 
         if (result == XR_ERROR_TIME_INVALID) {
-             spdlog::error("[VR] xrEndFrame time: submitted: {} vs frame_state: {}", frame_end_info.displayTime, this->frame_state.predictedDisplayTime);
+             spdlog::error("[VR] xrEndFrame time: submitted: {} (the rendered frame's slot: {}) vs frame_state: {}", frame_end_info.displayTime, pipelined_frame_state.predictedDisplayTime, this->frame_state.predictedDisplayTime);
              spdlog::error("[VR] display time diff: {}", frame_end_info.displayTime - this->frame_state.predictedDisplayTime);
         }
     } else {
