@@ -155,6 +155,7 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count) 
         }
 
         this->frame_state = local_frame_state;
+        this->waited_frame_state = local_frame_state;
 
         // Initialize all the existing frame states if they aren't already so we don't get some random error when calling xrEndFrame
         for (auto& pipeline_state : this->pipeline_states) {
@@ -509,16 +510,16 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         const auto& vr = VR::get();
         std::array<float, 4> tan_half_fov{};
 
-        if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_SYMMETRIC) {
-            tan_half_fov[0] = -std::max(std::max(-this->raw_projections[0][0], this->raw_projections[0][1]),
-                                        std::max(-this->raw_projections[1][0], this->raw_projections[1][1]));
-            tan_half_fov[1] = -tan_half_fov[0];
-        } else if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_MIRROR) {
-            float max_outer = std::max(-this->raw_projections[0][0], this->raw_projections[1][1]);
-            float max_inner = std::max(this->raw_projections[0][1], -this->raw_projections[1][0]);
-            tan_half_fov[0] = eye == 0 ? -max_outer : -max_inner;
-            tan_half_fov[1] = eye == 0 ? max_inner : max_outer;
-        } else if (this->cant_weight > 0.0f) {
+        // The cant belongs to this derivation alone. One left from an earlier blend step marks the eye canted
+        // (is_canted), and a field another branch takes is then submitted whole as the canted field: Symmetrical's
+        // wider render squeezed into the eye's own field, everything round drawn tall.
+        this->canted_yaw[eye] = 0.0f;
+        this->canted_left[eye] = 0.0f;
+        this->canted_right[eye] = 0.0f;
+
+        // A cant still easing out comes first, whatever the override: Symmetrical and Mirrored take their field once
+        // it is gone (see the blend below).
+        if (this->cant_weight > 0.0f) {
             // The eye's own field, seen from an axis turned towards its middle direction: the same angles, no strip
             // rendered for nothing. Fully canted the axis is on the middle and the field split evenly about it; on the
             // way to or from the raw projection the axis stands a share of the way (cant_weight, eased), and at none it
@@ -533,6 +534,15 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             this->canted_right[eye] = angle_right - turn;
             tan_half_fov[0] = std::tan(this->canted_left[eye]);
             tan_half_fov[1] = std::tan(this->canted_right[eye]);
+        } else if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_SYMMETRIC) {
+            tan_half_fov[0] = -std::max(std::max(-this->raw_projections[0][0], this->raw_projections[0][1]),
+                                        std::max(-this->raw_projections[1][0], this->raw_projections[1][1]));
+            tan_half_fov[1] = -tan_half_fov[0];
+        } else if (vr->get_horizontal_projection_override() == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_MIRROR) {
+            float max_outer = std::max(-this->raw_projections[0][0], this->raw_projections[1][1]);
+            float max_inner = std::max(this->raw_projections[0][1], -this->raw_projections[1][0]);
+            tan_half_fov[0] = eye == 0 ? -max_outer : -max_inner;
+            tan_half_fov[1] = eye == 0 ? max_inner : max_outer;
         } else {
             tan_half_fov[0] = this->raw_projections[eye][0];
             tan_half_fov[1] = this->raw_projections[eye][1];
@@ -560,10 +570,6 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             // Nothing is cropped: the whole width is the submitted field.
             view_bounds[eye][0] = 0.0f;
             view_bounds[eye][1] = 1.0f;
-        } else {
-            this->canted_yaw[eye] = 0.0f;
-            this->canted_left[eye] = 0.0f;
-            this->canted_right[eye] = 0.0f;
         }
 
         // Logged only in a settled state: a blend between raw and canted derives every frame on its way.
@@ -618,20 +624,23 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         const auto& vr = VR::get();
         const auto horizontal = vr->get_horizontal_projection_override();
 
-        if (this->projection_overrides_changed(horizontal, vr->get_vertical_projection_override(),
-                                               vr->should_grow_rectangle_for_projection_cropping())) {
+        const auto vertical = vr->get_vertical_projection_override();
+        const auto grow_rectangle = vr->should_grow_rectangle_for_projection_cropping();
+
+        if (this->projection_overrides_changed(horizontal, vertical, grow_rectangle)) {
             this->should_recalculate_eye_projections = true;
+            SPDLOG_INFO("Projection overrides: horizontal {}, vertical {}, scale render target {}", (int32_t)horizontal,
+                        (int32_t)vertical, grow_rectangle);
         }
 
         // THE CANT MOVES BY TIME, once per frame sync, here and nowhere else: the camera's yaw and the projection then
-        // change together, in the same derivation, so no frame renders one without the other. Only between the raw
-        // projection and Canted; any other override takes the field at once, as it always did. The first derivation
-        // starts where the override is, so a session does not open with a turn.
+        // change together, in the same derivation, so no frame renders one without the other. Whatever the override,
+        // the cant eases out before its field is taken: Symmetrical and Mirrored share the raw projection's axis, so
+        // the cant is the only turn a switch can make, and taken in one frame the view jumped by it. The first
+        // derivation starts where the override is, so a session does not open with a turn.
         const auto now = std::chrono::steady_clock::now();
         const auto first = !this->cant_weight_known || this->projections[0][2][3] == 0;
         const auto target = horizontal == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED ? 1.0f : 0.0f;
-        const auto blendable = horizontal == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_CANTED ||
-                               horizontal == VR::HORIZONTAL_PROJECTION_OVERRIDE::HORIZONTAL_DEFAULT;
         const auto blend_time = vr->get_projection_blend_time();
         const auto elapsed = first ? 0.0f : std::clamp(std::chrono::duration<float>(now - this->cant_weight_time).count(), 0.0f, 0.1f);
 
@@ -639,7 +648,7 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         this->cant_weight_known = true;
 
         if (this->cant_weight != target) {
-            if (first || !blendable || blend_time <= 0.0f) {
+            if (first || blend_time <= 0.0f) {
                 this->cant_weight = target;
             } else if (this->cant_weight < target) {
                 this->cant_weight = std::min(target, this->cant_weight + elapsed / blend_time);
@@ -1929,6 +1938,27 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     const auto& pipelined_stage_views = submit_state.stage_views;
     const auto& pipelined_frame_state = submit_state.frame_state;
 
+    // The frame xrBeginFrame began is the one xrWaitFrame last returned, and xrEndFrame ends it with that frame's time and
+    // its word on whether layers go out; the poses stay the rendered frame's. The rendered frame's pipeline slot can hold
+    // another frame's state: on STALKER 2 under SteamVR it was 20..180 ms older on 10..12 submits a second, SteamVR
+    // refused each (XR_ERROR_TIME_INVALID) and dropped the frame, and play stuttered; VDXR takes any time.
+    const auto& begun_frame_state = this->waited_frame_state.predictedDisplayTime != 0 ? this->waited_frame_state : pipelined_frame_state;
+
+    ++this->submits_counted;
+
+    if (pipelined_frame_state.predictedDisplayTime != begun_frame_state.predictedDisplayTime) {
+        ++this->stale_slot_submits;
+    }
+
+    if (this->submits_counted >= 600) {
+        if (this->stale_slot_submits > 0) {
+            spdlog::info("[VR] {} of the last {} submits found the rendered frame's slot holding another display time than the frame begun", this->stale_slot_submits, this->submits_counted);
+        }
+
+        this->stale_slot_submits = 0;
+        this->submits_counted = 0;
+    }
+
     if (pipelined_stage_views.empty()) {
         spdlog::warn("[VR] No stage views to submit");
     }
@@ -2005,7 +2035,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
 
     // we CANT push the layers every time, it cause some layer error
     // in xrEndFrame, so we must only do it when shouldRender is true
-    if (pipelined_frame_state.shouldRender == XR_TRUE && !pipelined_stage_views.empty()) {
+    if (begun_frame_state.shouldRender == XR_TRUE && !pipelined_stage_views.empty()) {
         projection_layer_views.resize(pipelined_stage_views.size(), {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
         depth_layers.resize(projection_layer_views.size(), {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
 
@@ -2124,7 +2154,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     }
 
     XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
-    frame_end_info.displayTime = pipelined_frame_state.predictedDisplayTime != 0 ? pipelined_frame_state.predictedDisplayTime : this->frame_state.predictedDisplayTime;
+    frame_end_info.displayTime = begun_frame_state.predictedDisplayTime != 0 ? begun_frame_state.predictedDisplayTime : this->frame_state.predictedDisplayTime;
     frame_end_info.environmentBlendMode = this->blend_mode;
     frame_end_info.layerCount = (uint32_t)layers.size();
     frame_end_info.layers = layers.data();
@@ -2141,7 +2171,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
         spdlog::error("[VR] xrEndFrame failed: {}", this->get_result_string(result));
 
         if (result == XR_ERROR_TIME_INVALID) {
-             spdlog::error("[VR] xrEndFrame time: submitted: {} vs frame_state: {}", frame_end_info.displayTime, this->frame_state.predictedDisplayTime);
+             spdlog::error("[VR] xrEndFrame time: submitted: {} (the rendered frame's slot: {}) vs frame_state: {}", frame_end_info.displayTime, pipelined_frame_state.predictedDisplayTime, this->frame_state.predictedDisplayTime);
              spdlog::error("[VR] display time diff: {}", frame_end_info.displayTime - this->frame_state.predictedDisplayTime);
         }
     } else {

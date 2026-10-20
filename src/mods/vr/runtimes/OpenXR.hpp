@@ -199,6 +199,14 @@ public:
     XrViewState stage_view_state{XR_TYPE_VIEW_STATE};
     XrFrameState frame_state{XR_TYPE_FRAME_STATE};
 
+    // The frame state xrWaitFrame last returned, as the runtime gave it: xrBeginFrame begins that frame, and xrEndFrame
+    // ends it with this one's time (end_frame). frame_state above is moved ahead by update_poses.
+    XrFrameState waited_frame_state{XR_TYPE_FRAME_STATE};
+
+    // Submits whose rendered frame's slot held another display time than the frame begun, counted for the log.
+    uint32_t stale_slot_submits{0};
+    uint32_t submits_counted{0};
+
     XrSessionState session_state{XR_SESSION_STATE_UNKNOWN};
 
     XrSpaceLocation view_space_location{XR_TYPE_SPACE_LOCATION};

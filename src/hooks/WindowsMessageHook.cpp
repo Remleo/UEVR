@@ -5,6 +5,7 @@
 
 #include "utility/Thread.hpp"
 
+#include "../Framework.hpp"
 #include "WindowsMessageHook.hpp"
 
 using namespace std;
@@ -17,6 +18,12 @@ LRESULT WINAPI window_proc(HWND wnd, UINT message, WPARAM w_param, LPARAM l_para
 
     if (g_windows_message_hook == nullptr) {
         return 0;
+    }
+
+    // The place a mouse message carries, stretched onto a flat window that hangs past the screen (Framework): the game
+    // reads its clicks and wheel turns from there.
+    if (g_framework != nullptr) {
+        l_param = g_framework->translate_mouse_message(message, l_param);
     }
 
     // Call our onMessage callback.

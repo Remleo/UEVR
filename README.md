@@ -19,6 +19,11 @@ links below, which all point to him.
 
 Newest first.
 
+- **The mouse cursor shows in the headset and reaches the whole interface**, also when the game's window is wider than
+  your monitor. It stands on the interface plane where a profile holds that still.
+- **Symmetrical and Mirrored projection no longer come out stretched** after Canted has been in use.
+- **No more stutter under SteamVR.**
+- **No more rare judder on head turns**, which only a game restart used to cure.
 - **A script can no longer crash the game with an object that is gone.** Every object a Lua script hands to the game is
   checked first: one that was destroyed, or whose memory now holds something else, is refused with a Lua error and a
   warning in the log, instead of crashing the game a moment later. The check costs about a ten-thousandth of the call it

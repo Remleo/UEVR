@@ -2771,6 +2771,45 @@ struct SceneViewExtensionAnalyzer {
     static inline std::unordered_map<sdk::FRHICommandBase_New*, void**> original_vtables{};
     static inline std::unordered_map<sdk::FRHICommandBase_New*, uint32_t> cmd_frame_counts{};
 
+    // A command list's own structure: commands chained from the root by their next fields, the last one's next field where
+    // the link points (each new command is put at *link, and the link moves to its next field). Returns how many commands,
+    // 0 for an empty list (no root, the link at the root field), -1 for memory that is no command list. `next_offset` is
+    // where a command keeps its next pointer: 8, behind the vtable (FRHICommandBase_New), or 0 (FRHICommandBase_Old).
+    static int32_t command_list_length(uintptr_t list, size_t next_offset) {
+        if (IsBadReadPtr((void*)list, sizeof(void*) * 2)) {
+            return -1;
+        }
+
+        const auto root = *(uintptr_t*)list;
+        const auto link = *(uintptr_t*)(list + sizeof(void*));
+
+        if (root == 0) {
+            return link == list ? 0 : -1;
+        }
+
+        auto command = root;
+
+        for (int32_t count = 1; count <= 4096; ++count) {
+            const auto next_field = command + next_offset;
+
+            if ((command & (sizeof(void*) - 1)) != 0 || IsBadReadPtr((void*)next_field, sizeof(void*))) {
+                return -1;
+            }
+
+            if (next_field == link) {
+                return count;
+            }
+
+            command = *(uintptr_t*)next_field;
+
+            if (command == 0) {
+                return -1;
+            }
+        }
+
+        return -1;
+    }
+
     // Meant to be called after analysis has been completed
     static void setup_view_extension_hook() {
         std::scoped_lock _{dummy_mutex};
@@ -2900,20 +2939,50 @@ struct SceneViewExtensionAnalyzer {
             (uintptr_t)&hooked_command_fn<6>
         };
 
-        cmd_frame_counts[last_command] = frame_count;
+        const auto live = *(void**)last_command == new_vtable.data();
 
-        if (original_vtables.contains(last_command) || *(void**)last_command == new_vtable.data()) {
-            static auto last_log_time = std::chrono::high_resolution_clock::time_point{};
-            const auto now = std::chrono::high_resolution_clock::now();
-            
-            if (now - last_log_time > std::chrono::seconds(1)) {
-                SPDLOG_WARN("Something strange is going on, the vtable is already hooked, maybe previous frame was not rendered?");
-                last_log_time = now;
+        // An entry whose address holds the engine's vtable again is stale: its command went without running the hook,
+        // and the memory holds another command now. Dropped, so that one is hooked; kept, it blocked every command at
+        // that address for the rest of the session.
+        if (!live && original_vtables.contains(last_command)) {
+            original_vtables.erase(last_command);
+
+            static uint32_t stale_dropped{0};
+            static auto last_stale_log = std::chrono::steady_clock::time_point{};
+            const auto now = std::chrono::steady_clock::now();
+
+            ++stale_dropped;
+
+            if (now - last_stale_log > std::chrono::seconds(10)) {
+                SPDLOG_WARN("A hooked command went without running the hook; its entry was dropped ({} so far)", stale_dropped);
+                last_stale_log = now;
+            }
+        }
+
+        // A hook still waiting to run takes the newer frame number. Under the native stereo fix that is the frame's second
+        // view family when a game numbers its two families apart (STALKER 2: one apart, so the same-frame check in
+        // pre_render_viewfamily_renderthread lets it through to the same command); more than one apart, the command
+        // waited across frames.
+        if (live) {
+            const auto previous = cmd_frame_counts[last_command];
+
+            cmd_frame_counts[last_command] = frame_count;
+
+            if ((int64_t)frame_count - (int64_t)previous > 1) {
+                static auto last_log_time = std::chrono::high_resolution_clock::time_point{};
+                const auto now = std::chrono::high_resolution_clock::now();
+
+                if (now - last_log_time > std::chrono::seconds(1)) {
+                    SPDLOG_WARN("A hooked command was still waiting when frame {} came (hooked at {}), maybe the previous frame was not rendered?",
+                        frame_count, previous);
+                    last_log_time = now;
+                }
             }
 
             return;
         }
 
+        cmd_frame_counts[last_command] = frame_count;
         original_vtables[last_command] = *(void***)last_command;
         *(void***)last_command = (void**)new_vtable.data();
     }
@@ -3849,6 +3918,54 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
             }
 
             static size_t actual_offset = 0;
+            static uint32_t structure_tries = 0;
+
+            // Where the command list is, found by its own structure (SceneViewExtensionAnalyzer::command_list_length): at
+            // offset 0, or past an FMemStack at the top on UE5.5+. Taken only from a list with commands in it, and cached
+            // only then; until it is found, a frame's poses go out directly. The module test below took a memory stack's
+            // free space for the root on STALKER 2 (UE5.5) in some sessions: the hook landed where the game put its next
+            // command, never ran, and for the whole session most frames were submitted with poses newer than they were
+            // rendered with -- the view juddered on head turns until the game was restarted. The module test stays as the
+            // fallback after 120 frames with no list found this way.
+            if (!analyzed_root_already && structure_tries < 120) {
+                ++structure_tries;
+
+                bool found = false;
+
+                try {
+                    for (const size_t offset : { 0x0, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48 }) {
+                        for (const size_t next_offset : { sizeof(void*), (size_t)0 }) {
+                            const auto commands = SceneViewExtensionAnalyzer::command_list_length((uintptr_t)command_list + offset, next_offset);
+
+                            if (commands > 0) {
+                                actual_offset = offset;
+                                is_old_command_base = next_offset == 0;
+                                analyzed_root_already = true;
+                                found = true;
+                                SPDLOG_INFO("Command list found at offset 0x{:x} by its structure ({} commands from the root to the link), {} FRHICommandBase",
+                                    offset, commands, is_old_command_base ? "old" : "new");
+                                break;
+                            }
+                        }
+
+                        if (found) {
+                            break;
+                        }
+                    }
+                } catch(...) {
+                    SPDLOG_ERROR("Failed to read a command list candidate");
+                }
+
+                if (!found) {
+                    if (structure_tries >= 120) {
+                        SPDLOG_WARN("No command list found by its structure in {} frames, falling back to the module test", structure_tries);
+                    }
+
+                    vr->get_runtime()->enqueue_render_poses(frame_count + compensation);
+                    return;
+                }
+            }
+
             auto l = (sdk::FRHICommandListBase*)((uintptr_t)command_list + actual_offset);
             const auto is_ue5 = g_hook->has_double_precision();
 
