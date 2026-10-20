@@ -1177,6 +1177,30 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     layer.eyeVisibility = XrEyeVisibility::XR_EYE_VISIBILITY_BOTH;
 
+    // THE CURSOR ALONE GOES ON THE GAME'S PLANE. With the menu closed this quad carries nothing but ImGui's cursor
+    // (Always Show Cursor), drawn where the mouse is in the window -- over the pixel of the game's interface the mouse is
+    // over, the two swapchains being made alike. Placed through the rotation offset, it parted from a plane placed any
+    // other way: held where it hung on the headset (set_plane_held), the interface came up turned and tilted while the
+    // cursor did not, and rode beside what it pointed at. So it takes the pose and size the game's quad was submitted with
+    // this frame (made before this one), a centimetre nearer the eye. A curved plane keeps the old placement.
+    if (!g_framework->is_drawing_ui()) {
+        const auto& game = m_parent->get_last_quad_pose(PLANE_GAME);
+        const auto type = (OverlayComponent::OverlayType)m_parent->m_slate_overlay_type->value();
+        const auto game_is_quad = type != OverlayComponent::OverlayType::CYLINDER || !vr->get_runtime()->is_cylinder_layer_allowed();
+
+        if (game.space != 0 && game_is_quad) {
+            layer.space = game.space == 1 ? vr->m_openxr->view_space : vr->m_openxr->stage_space;
+            layer.pose.orientation = runtimes::OpenXR::to_openxr(game.rotation);
+            layer.pose.position = runtimes::OpenXR::to_openxr(game.position + game.rotation * glm::vec3{0.0f, 0.0f, 0.01f});
+            layer.size = this->m_slate_layer[PLANE_GAME].size;
+
+            // Nothing of the menu is out to be pointed at.
+            m_parent->m_framework_intersect_state.intersecting = false;
+
+            return layer;
+        }
+    }
+
     auto glm_matrix = glm::identity<glm::mat4>();
 
     if (vr->m_overlay_component.m_framework_ui_follows_view->value()) {
