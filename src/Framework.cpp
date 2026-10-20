@@ -2,9 +2,11 @@
 #include <filesystem>
 
 #include <windows.h>
+#include <windowsx.h>
 #include <ShlObj.h>
 
 #include <spdlog/sinks/basic_file_sink.h>
+#include <SafetyHook.hpp>
 
 #include <imgui.h>
 #include "uevr-imgui/font_robotomedium.hpp"
@@ -764,28 +766,239 @@ void Framework::activate_window() {
     //SetActiveWindow(m_wnd);
 }
 
-void Framework::patch_set_cursor_pos() {
+// THE CURSOR IS STRETCHED ONTO THE FLAT WINDOW WHERE IT HANGS PAST THE SCREEN. A VR profile sizes the flat window to the
+// headset's width for the interface's sake, wider than a monitor (STALKER 2 with mouse and keyboard: 3072 x 2304 on a
+// 2560 x 1440 screen), and Windows keeps the cursor on the screen, so the interface past the edge could never be pointed
+// at. The screen's part of the client area stands for the whole of it instead: the place every reader in the process is
+// handed by GetCursorPos -- the engine's Slate at each mouse move (FWindowsCursor::GetPosition) and ImGui each frame --
+// is stretched from that part onto the client area, each axis by its own ratio; the places the engine reads off the
+// button and wheel messages go the same way (translate_mouse_message), and a place the game sets (SetCursorPos) comes
+// back. The cursor in the headset, ImGui's, then stands over what the game hit-tests; the hardware cursor on the flat
+// mirror no longer does, and nothing moves. A window that fits the screen maps onto itself, and so does any window while
+// UEVR draws no cursor (cursor_map). The hooks themselves are set once, in every game.
+//
+// DO NOT MOVE THE WINDOW UNDER THE CURSOR INSTEAD, by a step or by the mouse's push past the edge. The shell decides
+// anew at every move whether the window covers its monitor, and the taskbar came up for a moment at each, right under a
+// cursor held at the bottom edge (the push moved the window up to 280 times a second, and the frame rate fell with it);
+// and a cursor set back by a step was put back on the edge 0.2..3.6 ms later by mouse events Windows had already placed
+// from where it stood, in most moves made with the mouse in motion (measured through a low-level mouse hook beside a
+// GetCursorPos sampler; an absolute move injected with SendInput fared the same).
+namespace {
+// Both hooks reach everyone in the process, the engine and ImGui alike; the originals are called through them.
+safetyhook::InlineHook g_get_cursor_pos_hook{};
+safetyhook::InlineHook g_set_cursor_pos_hook{};
+
+BOOL WINAPI get_cursor_pos_hook(LPPOINT pt) {
+    const auto ok = g_get_cursor_pos_hook.call<BOOL>(pt);
+
+    if (ok && pt != nullptr && g_framework != nullptr) {
+        g_framework->map_cursor_to_window(*pt);
+    }
+
+    return ok;
+}
+
+BOOL WINAPI set_cursor_pos_hook(int x, int y) {
+    if (g_framework != nullptr) {
+        // The game is told its move happened while UEVR's cursor is drawn: it must not move the cursor from under it.
+        if (g_framework->is_set_cursor_pos_blocked()) {
+            return TRUE;
+        }
+
+        POINT pt{x, y};
+        g_framework->map_cursor_from_window(pt);
+        x = pt.x;
+        y = pt.y;
+    }
+
+    return g_set_cursor_pos_hook.call<BOOL>(x, y);
+}
+
+// A place along one span taken along another, the first and the last pixel onto the first and the last; equal spans
+// only shift.
+LONG rescale(LONG v, LONG from_lo, LONG from_hi, LONG to_lo, LONG to_hi) {
+    const auto from = from_hi - from_lo;
+    const auto to = to_hi - to_lo;
+
+    if (from <= 1 || to <= 1 || from == to) {
+        return v + (to_lo - from_lo);
+    }
+
+    return to_lo + (LONG)std::lround((double)(v - from_lo) * (to - 1) / (from - 1));
+}
+
+// Where a jump at an entry lands, through any chain of them: a user32 entry may carry another hook's jump already, and
+// the inline hook then goes on what it jumps to.
+void* resolve_jumps(void* entry) {
+    auto at = (uint8_t*)entry;
+
+    for (auto i = 0; i < 8 && at != nullptr; ++i) {
+        if (at[0] == 0xE9) {
+            at = at + 5 + *(const int32_t*)(at + 1);
+        } else if (at[0] == 0xFF && at[1] == 0x25) {
+            at = *(uint8_t* const*)(at + 6 + *(const int32_t*)(at + 2));
+        } else {
+            break;
+        }
+    }
+
+    return at;
+}
+
+safetyhook::InlineHook hook_user32(const char* name, void* detour) {
+    const auto user32 = GetModuleHandleW(L"user32.dll");
+    const auto fn = user32 != nullptr ? (void*)GetProcAddress(user32, name) : nullptr;
+
+    if (fn == nullptr) {
+        return {};
+    }
+
+    auto hook = safetyhook::create_inline(fn, detour);
+
+    if (!hook) {
+        const auto target = resolve_jumps(fn);
+
+        if (target != fn) {
+            hook = safetyhook::create_inline(target, detour);
+        }
+    }
+
+    return hook;
+}
+}
+
+void Framework::install_cursor_hooks() {
     std::scoped_lock _{ m_patch_mtx };
 
-    if (m_set_cursor_pos_patch.get() == nullptr) {
-        // Make SetCursorPos ret early
-        const auto set_cursor_pos_addr = (uintptr_t)GetProcAddress(GetModuleHandleA("user32.dll"), "SetCursorPos");
+    if (m_cursor_hooks_tried) {
+        return;
+    }
 
-        if (set_cursor_pos_addr != 0) {
-            spdlog::info("Patching SetCursorPos");
-            m_set_cursor_pos_patch = Patch::create(set_cursor_pos_addr, {0xC3});
-        }
+    m_cursor_hooks_tried = true;
+    g_get_cursor_pos_hook = hook_user32("GetCursorPos", get_cursor_pos_hook);
+    g_set_cursor_pos_hook = hook_user32("SetCursorPos", set_cursor_pos_hook);
+
+    // Without the first the interface past the screen cannot be pointed at; without the second the game moves the cursor
+    // from under UEVR's.
+    spdlog::info("[Framework] Cursor hooks: GetCursorPos {}, SetCursorPos {}", g_get_cursor_pos_hook ? "set" : "REFUSED",
+                 g_set_cursor_pos_hook ? "set" : "REFUSED");
+}
+
+void Framework::block_set_cursor_pos(bool on) {
+    if (m_set_cursor_pos_blocked.exchange(on) != on) {
+        install_cursor_hooks();
+        spdlog::info("[Framework] The game's SetCursorPos is {}", on ? "held off: UEVR's cursor is drawn" : "let through");
     }
 }
 
-void Framework::remove_set_cursor_pos_patch() {
-    std::scoped_lock _{ m_patch_mtx };
-
-    if (m_set_cursor_pos_patch.get() != nullptr) {
-        spdlog::info("Removing SetCursorPos patch");
+bool Framework::cursor_map(RECT& client, RECT& visible) const {
+    // Only while UEVR draws a cursor in the headset (its own menu, or Always Show Cursor): the stretch is for that cursor.
+    // With none drawn the flat mirror is the only place a cursor is seen, and there the hardware cursor should sit over
+    // what it points at.
+    if (!m_draw_ui && !FrameworkConfig::get()->is_always_show_cursor()) {
+        return false;
     }
 
-    m_set_cursor_pos_patch.reset();
+    RECT c{};
+    POINT origin{0, 0};
+
+    if (m_wnd == nullptr || !GetClientRect(m_wnd, &c) || !ClientToScreen(m_wnd, &origin)) {
+        return false;
+    }
+
+    client = RECT{origin.x, origin.y, origin.x + c.right, origin.y + c.bottom};
+
+    if (client.right <= client.left || client.bottom <= client.top) {
+        return false;
+    }
+
+    // Every monitor together: what the cursor can be on. A second monitor past an edge lets the cursor onto the window
+    // there, and that part needs no stretch.
+    const RECT desktop{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                       GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                       GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+
+    if (!IntersectRect(&visible, &client, &desktop)) {
+        return false;
+    }
+
+    return visible.right - visible.left < client.right - client.left ||
+           visible.bottom - visible.top < client.bottom - client.top;
+}
+
+void Framework::map_cursor_to_window(POINT& pt) const {
+    RECT client{};
+    RECT visible{};
+
+    if (!cursor_map(client, visible)) {
+        return;
+    }
+
+    pt.x = rescale(pt.x, visible.left, visible.right, client.left, client.right);
+    pt.y = rescale(pt.y, visible.top, visible.bottom, client.top, client.bottom);
+}
+
+void Framework::map_cursor_from_window(POINT& pt) const {
+    RECT client{};
+    RECT visible{};
+
+    if (!cursor_map(client, visible)) {
+        return;
+    }
+
+    pt.x = rescale(pt.x, client.left, client.right, visible.left, visible.right);
+    pt.y = rescale(pt.y, client.top, client.bottom, visible.top, visible.bottom);
+}
+
+LPARAM Framework::translate_mouse_message(UINT message, LPARAM l_param) const {
+    auto client_coordinates = false;
+
+    switch (message) {
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_RBUTTONDBLCLK:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_MBUTTONDBLCLK:
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP:
+    case WM_XBUTTONDBLCLK:
+        client_coordinates = true;
+        break;
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        break;
+    default:
+        return l_param;
+    }
+
+    RECT client{};
+    RECT visible{};
+
+    if (!cursor_map(client, visible)) {
+        return l_param;
+    }
+
+    POINT pt{GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+
+    if (client_coordinates) {
+        pt.x += client.left;
+        pt.y += client.top;
+    }
+
+    pt.x = rescale(pt.x, visible.left, visible.right, client.left, client.right);
+    pt.y = rescale(pt.y, visible.top, visible.bottom, client.top, client.bottom);
+
+    if (client_coordinates) {
+        pt.x -= client.left;
+        pt.y -= client.top;
+    }
+
+    return MAKELPARAM((SHORT)pt.x, (SHORT)pt.y);
 }
 
 void Framework::set_mouse_to_center() {
@@ -796,15 +1009,15 @@ void Framework::set_mouse_to_center() {
     RECT rect{};
     GetWindowRect(m_wnd, &rect);
 
-    int x = (rect.left + rect.right) / 2;
-    int y = (rect.top + rect.bottom) / 2;
+    // The window's middle as the game sees it, put where the screen's part of the window has it -- past the block, which
+    // is for the game's own calls.
+    POINT pt{(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+    map_cursor_from_window(pt);
 
-    if (m_set_cursor_pos_patch != nullptr) {
-        remove_set_cursor_pos_patch();
-        SetCursorPos(x, y);
-        patch_set_cursor_pos();
+    if (g_set_cursor_pos_hook) {
+        g_set_cursor_pos_hook.call<BOOL>((int)pt.x, (int)pt.y);
     } else {
-        SetCursorPos(x, y);
+        SetCursorPos(pt.x, pt.y);
     }
 }
 
@@ -827,6 +1040,8 @@ bool Framework::on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_para
     if (message != WM_GETTEXT && !WindowFilter::get().is_filtered(wnd)) {
         m_uevr_shared_memory->data().main_thread_id = GetCurrentThreadId();
     }
+
+    install_cursor_hooks();
 
     bool is_mouse_moving{false};
     switch (message) {
@@ -1203,12 +1418,8 @@ void Framework::draw_ui() {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange; // causes bugs with the cursor
 
     if (!m_draw_ui) {
-        // remove SetCursorPos patch
-        if (!FrameworkConfig::get()->is_always_show_cursor()) {
-            remove_set_cursor_pos_patch();
-        } else {
-            patch_set_cursor_pos();
-        }
+        // The game may move the cursor only while UEVR's is not drawn over it.
+        block_set_cursor_pos(FrameworkConfig::get()->is_always_show_cursor());
 
         m_is_ui_focused = false;
         if (m_last_draw_ui) {
@@ -1498,7 +1709,7 @@ void Framework::draw_ui() {
     if (m_draw_ui != m_last_draw_ui) {
         if (m_draw_ui) {
             set_mouse_to_center();
-            patch_set_cursor_pos();
+            block_set_cursor_pos(true);
         }
 
         m_draw_ui = m_last_draw_ui;

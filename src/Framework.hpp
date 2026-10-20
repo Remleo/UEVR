@@ -112,8 +112,16 @@ public:
 
     void activate_window();
     void set_mouse_to_center();
-    void patch_set_cursor_pos();
-    void remove_set_cursor_pos_patch();
+
+    // While UEVR's cursor is drawn the game's SetCursorPos is told it happened and does nothing (the cursor hooks in the
+    // implementation).
+    void block_set_cursor_pos(bool on);
+    bool is_set_cursor_pos_blocked() const { return m_set_cursor_pos_blocked; }
+
+    // The cursor stretched onto a flat window that hangs past the screen, and back; see the implementation.
+    void map_cursor_to_window(POINT& pt) const;
+    void map_cursor_from_window(POINT& pt) const;
+    LPARAM translate_mouse_message(UINT message, LPARAM l_param) const;
     void post_message(UINT message, WPARAM w_param, LPARAM l_param);
     bool on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param);
 
@@ -334,7 +342,6 @@ private:
     std::shared_ptr<spdlog::details::registry> m_spdlog_handler{spdlog::details::registry::instance_shared()};
     std::shared_ptr<spdlog::logger> m_logger{};
     std::unique_ptr<UEVRSharedMemory> m_uevr_shared_memory{};
-    Patch::Ptr m_set_cursor_pos_patch{};
 
     std::unique_ptr<ThreadWorker<void>> m_frame_worker{ std::make_unique<ThreadWorker<void>>() };
 
@@ -347,6 +354,13 @@ private:
     std::recursive_mutex m_constructor_mutex{};
     std::unique_ptr<std::jthread> m_d3d_monitor_thread{};
     std::unique_ptr<std::jthread> m_command_thread{};
+
+    // The cursor hooks (GetCursorPos, SetCursorPos), set once; the client area and the screen's part of it that the
+    // mapping stretches between, false where the window fits the screen.
+    void install_cursor_hooks();
+    bool cursor_map(RECT& client, RECT& visible) const;
+    bool m_cursor_hooks_tried{false};
+    std::atomic<bool> m_set_cursor_pos_blocked{false};
     std::chrono::steady_clock::time_point m_last_present_time{};
     std::chrono::steady_clock::time_point m_last_message_time{};
     std::chrono::steady_clock::time_point m_last_sendmessage_time{};
