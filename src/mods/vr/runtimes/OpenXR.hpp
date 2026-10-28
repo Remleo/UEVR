@@ -335,7 +335,11 @@ public:
 
     PipelineState last_submit_state{};
     PipelineState get_submit_state();
-    
+
+    // The orientation the frame about to be submitted was rendered for, while View Follows Aim holds its picture in the
+    // room; nothing otherwise. Read from the same record get_submit_state takes, without consuming it.
+    std::optional<glm::quat> peek_submit_anchor();
+
     const ModSlider::Ptr resolution_scale{ ModSlider::create("OpenXR_ResolutionScale", 0.1f, 3.0f, 1.0f) };
     const ModToggle::Ptr ignore_vd_checks{ ModToggle::create("OpenXR_IgnoreVirtualDesktopChecks", false) };
     bool push_dummy_projection{ false };
@@ -362,10 +366,6 @@ public:
         UI_RIGHT, // For 2D view with stereoscopic
         FRAMEWORK_UI,
 
-        // A second UI plane, fed from a render target a script hands us. Unused unless a script sets a
-        // source, so the swapchain is created but stays untouched otherwise.
-        UI_SECONDARY,
-
         EXTRA_END,
 
         AFR_START,
@@ -378,16 +378,20 @@ public:
 
         AFR_END,
 
+        // The UI planes scripts ask for, one swapchain each from here on: plane 1 here, plane 2 the next, and so on.
+        // Each is made when its plane is asked for and destroyed with it, on its own -- see ui_plane_swapchain.
+        UI_SCRIPT_START = AFR_END,
+
         END = AFR_END,
 
         STANDARD_COUNT = STANDARD_END - STANDARD_START,
         EXTRA_COUNT = EXTRA_END - EXTRA_START,
     };
 
-    // Which swapchain a UI plane's picture lives in. Plane 0 is the interface the game draws; plane 1 is fed
-    // by a script. Kept here next to the names so the copy and the submit cannot disagree about it.
+    // Which swapchain a UI plane's picture lives in. Plane 0 is the interface the game draws; planes from 1 on are the
+    // ones scripts ask for. Kept here next to the names so the copy and the submit cannot disagree about it.
     static constexpr SwapchainIndex ui_plane_swapchain(size_t plane) {
-        return plane == 0 ? SwapchainIndex::UI : SwapchainIndex::UI_SECONDARY;
+        return plane == 0 ? SwapchainIndex::UI : (SwapchainIndex)((uint32_t)SwapchainIndex::UI_SCRIPT_START + (uint32_t)plane - 1);
     }
 
     struct Action {

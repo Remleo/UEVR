@@ -44,6 +44,46 @@ std::optional<glm::mat4> OverlayComponent::get_held_head(size_t plane) const {
     return m_held_head[plane];
 }
 
+// Written from a script's thread and read where the layers are made, like any value set_mod_value writes: one float or
+// bool each, so a frame sees either the old value or the new one.
+void OverlayComponent::copy_placement(size_t from, size_t to) {
+    if (from >= PLANE_COUNT || to >= PLANE_COUNT) {
+        return;
+    }
+
+    m_slate_distance[to]->value() = m_slate_distance[from]->value();
+    m_slate_size[to]->value() = m_slate_size[from]->value();
+    m_slate_x_offset[to]->value() = m_slate_x_offset[from]->value();
+    m_slate_y_offset[to]->value() = m_slate_y_offset[from]->value();
+    m_ui_follows_view[to]->value() = m_ui_follows_view[from]->value();
+}
+
+// Script planes only: the game's plane is placed by the player's own settings.
+void OverlayComponent::set_plane_distance(size_t plane, float meters) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_slate_distance[plane]->value() = meters;
+    }
+}
+
+void OverlayComponent::set_plane_size(size_t plane, float meters) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_slate_size[plane]->value() = meters;
+    }
+}
+
+void OverlayComponent::set_plane_offset(size_t plane, float x, float y) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_slate_x_offset[plane]->value() = x;
+        m_slate_y_offset[plane]->value() = y;
+    }
+}
+
+void OverlayComponent::set_plane_follows_view(size_t plane, bool follows) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_ui_follows_view[plane]->value() = follows;
+    }
+}
+
 std::optional<std::string> OverlayComponent::on_initialize_openvr() {
     m_overlay_data = {};
 
@@ -874,11 +914,10 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     layer.subImage.imageRect.offset.y = 0;
     layer.eyeVisibility = eye;
 
-    // CROPPED TO WHAT WAS ACTUALLY DRAWN. A plane fed by a script gets a swapchain as large as the game's,
-    // because swapchains are made at session start when no script exists to say how big the picture will be.
-    // The source is copied to the origin and is usually far smaller, so submitting the whole swapchain would
-    // ring the picture with everything else in that texture -- which is what "the reticle is tiny" looked
-    // like. The game's own plane fills its swapchain, so its rect is the whole thing.
+    // CROPPED TO WHAT WAS ACTUALLY DRAWN. A script plane's swapchain is the game interface's size, while the texture a
+    // script hands it can be any size. The source is copied to the origin and is usually far smaller, so submitting the
+    // whole swapchain would ring the picture with everything else in that texture -- which is what "the reticle is
+    // tiny" looked like. The game's own plane fills its swapchain, so its rect is the whole thing.
     const auto source_size = vr->get_ui_source_size(plane);
     const auto has_source_size = source_size[0] != 0 && source_size[1] != 0;
 
@@ -890,11 +929,19 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 
     auto glm_matrix = glm::identity<glm::mat4>();
     const auto held = m_parent->get_held_head(plane);
+    const auto follows_view = vr->m_overlay_component.m_ui_follows_view[plane]->value();
+
+    // A PLANE BOUND TO THE STAGE GOES WITH THE PICTURE while the view follows the aim, and the picture may be held in
+    // the room (View Follows Aim Anchor): then it stands at that frame's anchor, as the projection layer does. Put on
+    // the head instead, a reticle there travelled with every turn of the head while the picture stood where the aim put
+    // it (The Outer Worlds 2, through the sniper scope). A plane the player keeps on the head keeps it.
+    const auto picture = !held.has_value() && !follows_view && vr->is_view_following_aim()
+                         ? vr->m_openxr->peek_submit_anchor() : std::nullopt;
 
     // Held first: a script asked for the plane to stay where it hung on the headset (set_plane_held), and that
     // overrides both the binding and the aim.
     //
-    // Head locked while the view follows the aim, whatever the setting says.
+    // While the view follows the aim, where the picture is: held in the room, or on the head.
     //
     // The other branch anchors the quad in the stage through the rotation offset, which is taken once when
     // the aim takes over. Head movement then leaves the quad facing where the head used to be while the
@@ -903,7 +950,11 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     if (held.has_value()) {
         glm_matrix = *held;
         layer.space = vr->m_openxr->stage_space;
-    } else if (vr->m_overlay_component.m_ui_follows_view[plane]->value() || vr->is_view_following_aim()) {
+    } else if (picture.has_value()) {
+        glm_matrix = glm::mat4_cast(*picture);
+        glm_matrix[3] = glm::vec4{glm::vec3{vr->get_position(0)}, 1.0f};
+        layer.space = vr->m_openxr->stage_space;
+    } else if (follows_view || vr->is_view_following_aim()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());
@@ -945,10 +996,11 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     //
     // Only for the layer anchored in the stage through the rotation offset. Head locked, its middle is already the
     // middle of the picture; the offsets below are the player's placement, and scaling them would just drag the UI
-    // around. Held, it is meant to stay put.
+    // around. Held, it is meant to stay put. Standing with the picture held in the room, it is on that picture's own
+    // axis, which magnification does not move.
     const auto zoom = vr->get_zoom_factor();
 
-    if (zoom > 1.0f && layer.space == vr->m_openxr->stage_space && !held.has_value()) {
+    if (zoom > 1.0f && layer.space == vr->m_openxr->stage_space && !held.has_value() && !picture.has_value()) {
         // Two frames are in play. The compositor will place this layer against the head, so the result has
         // to be expressed there; the picture inside it was rendered for the view rotation, so that is what
         // the offset is measured against. With the head still the two are the same rotation; once it turns,
@@ -1187,6 +1239,19 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
         const auto& game = m_parent->get_last_quad_pose(PLANE_GAME);
         const auto type = (OverlayComponent::OverlayType)m_parent->m_slate_overlay_type->value();
         const auto game_is_quad = type != OverlayComponent::OverlayType::CYLINDER || !vr->get_runtime()->is_cylinder_layer_allowed();
+
+        // Said on a change, so a cursor drawn but put somewhere else than the interface it points at shows in the log.
+        const auto placement = !game_is_quad ? 3 : (int)game.space;
+
+        if (placement != m_cursor_placement) {
+            m_cursor_placement = placement;
+
+            spdlog::info("[OverlayComponent] UEVR's cursor goes {}",
+                placement == 1 ? "on the game's interface plane, which is on the head" :
+                placement == 2 ? "on the game's interface plane, which is in the room" :
+                placement == 3 ? "by the rotation offset: the game's interface plane is curved" :
+                                 "by the rotation offset, NOT ON THE GAME'S INTERFACE: that plane was not submitted this frame");
+        }
 
         if (game.space != 0 && game_is_quad) {
             layer.space = game.space == 1 ? vr->m_openxr->view_space : vr->m_openxr->stage_space;

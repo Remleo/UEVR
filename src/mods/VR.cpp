@@ -1958,7 +1958,72 @@ void VR::on_pre_imgui_frame() {
     }
 }
 
-// Hand a render target over to be presented as the secondary UI layer, or null to take it away.
+// A slot is taken here and nothing else: the plane's swapchain is made by the render thread
+// (D3D12Component::OpenXR::update_ui_planes), on its own, so the swapchains already there are not touched.
+size_t VR::create_ui_plane_sized_like_game_ui() {
+    std::scoped_lock _{m_ui_plane_mtx};
+
+    for (size_t plane = vrmod::OverlayComponent::PLANE_SCRIPT; plane < m_ui_plane_made.size(); ++plane) {
+        if (m_ui_plane_made[plane].load()) {
+            continue;
+        }
+
+        get_overlay_component().copy_placement(vrmod::OverlayComponent::PLANE_GAME, plane);
+        get_overlay_component().set_plane_held(plane, false);
+        m_ui_plane_made[plane] = true;
+
+        const auto size = g_framework->get_rt_size();
+        spdlog::info("[VR] UI plane {} made, sized like the game's interface ({}x{} now), placed where the game's plane stands",
+            plane, (uint32_t)size.x, (uint32_t)size.y);
+
+        if (g_framework->get_renderer_type() != Framework::RendererType::D3D12) {
+            spdlog::warn("[VR] UI plane {}: planes made by scripts are drawn by the D3D12 path only, this one stays empty", plane);
+        }
+
+        return plane;
+    }
+
+    spdlog::error("[VR] No UI plane made: all {} planes for scripts are taken", vrmod::OverlayComponent::SCRIPT_PLANE_COUNT);
+
+    return 0;
+}
+
+bool VR::destroy_ui_plane(size_t plane) {
+    std::scoped_lock _{m_ui_plane_mtx};
+
+    if (!is_ui_plane_made(plane)) {
+        spdlog::info("[VR] UI plane {} not destroyed: it was not made", plane);
+        return false;
+    }
+
+    set_ui_plane_source(plane, nullptr);
+    get_overlay_component().set_plane_held(plane, false);
+    m_ui_plane_made[plane] = false;
+
+    spdlog::info("[VR] UI plane {} destroyed, its swapchain goes on the render thread", plane);
+
+    return true;
+}
+
+// Before planes were asked for, plane 1 always existed and was placed by its config keys, and profiles still feed it
+// this way. Made here on its first source, placed by those keys -- not from the game's plane, which would overwrite
+// what such a profile has already written into them.
+void VR::set_secondary_ui_source(sdk::UTexture* tex) {
+    constexpr auto plane = vrmod::OverlayComponent::PLANE_SCRIPT;
+
+    if (tex != nullptr) {
+        std::scoped_lock _{m_ui_plane_mtx};
+
+        if (!m_ui_plane_made[plane].load()) {
+            m_ui_plane_made[plane] = true;
+            spdlog::info("[VR] UI plane {} made for set_secondary_ui_source, sized like the game's interface, placed by the UI_Secondary_* keys", plane);
+        }
+    }
+
+    set_ui_plane_source(plane, tex);
+}
+
+// Hand a render target over to be presented on a script plane, or null to take it off.
 //
 // The pointer is only stored here. Walking down to the native resource needs an offset inside UTexture
 // that is only discoverable once the engine has actually created the resource, and that lookup has to run
@@ -1967,13 +2032,20 @@ void VR::on_pre_imgui_frame() {
 //
 // Logged loudly on purpose: this is reached from a script, and the failure modes are all invisible
 // otherwise -- a texture that never gets a resource, a lookup that never lands, a source replaced twice.
-void VR::set_secondary_ui_source(sdk::UTexture* tex) {
-    // Named once instead of spelled out at every use: the index is the whole subject of this function.
-    constexpr auto plane = vrmod::OverlayComponent::PLANE_SCRIPT;
+bool VR::set_ui_plane_source(size_t plane, sdk::UTexture* tex) {
+    if (plane < vrmod::OverlayComponent::PLANE_SCRIPT || plane >= m_ui_source.size()) {
+        spdlog::error("[VR] UI plane {} has no source to set: it is not a plane for scripts", plane);
+        return false;
+    }
 
     if (tex == m_ui_source[plane]) {
-        SPDLOG_INFO("[VR] Secondary UI source unchanged ({:x})", (uintptr_t)tex);
-        return;
+        SPDLOG_INFO("[VR] UI plane {} source unchanged ({:x})", plane, (uintptr_t)tex);
+        return true;
+    }
+
+    if (tex != nullptr && !is_ui_plane_made(plane)) {
+        spdlog::error("[VR] UI plane {} was not made, its source is refused", plane);
+        return false;
     }
 
     m_ui_source[plane] = tex;
@@ -1983,8 +2055,8 @@ void VR::set_secondary_ui_source(sdk::UTexture* tex) {
     m_ui_source_serial[plane] = 0;
 
     if (tex == nullptr) {
-        SPDLOG_INFO("[VR] Secondary UI source cleared, the layer will stop being submitted");
-        return;
+        SPDLOG_INFO("[VR] UI plane {} source cleared, the plane will stop being submitted", plane);
+        return true;
     }
 
     // WHERE IT SITS IN THE OBJECT TABLE, taken now, while the object is certainly alive. Loading a save destroys it
@@ -1998,20 +2070,20 @@ void VR::set_secondary_ui_source(sdk::UTexture* tex) {
             m_ui_source_index[plane] = index;
             m_ui_source_serial[plane] = item->serial_number;
         } else {
-            SPDLOG_ERROR("[VR] Secondary UI source is not in the object table, refusing it");
+            SPDLOG_ERROR("[VR] UI plane {} source is not in the object table, refusing it", plane);
             m_ui_source[plane] = nullptr;
-            return;
+            return false;
         }
     }
 
-    SPDLOG_INFO("[VR] Secondary UI source set to {:x}, resolving its resource offset on the render thread",
-        (uintptr_t)tex);
+    SPDLOG_INFO("[VR] UI plane {} source set to {:x}, resolving its resource offset on the render thread",
+        plane, (uintptr_t)tex);
 
     // Retried every render loop until the resource exists. Returning false asks for another attempt, and
     // the timeout below stops a texture that never materializes from spinning forever.
-    RenderThreadWorker::get().enqueue_conditional([this, tex]() -> bool {
+    RenderThreadWorker::get().enqueue_conditional([this, plane, tex]() -> bool {
         if (m_ui_source[plane] != tex) {
-            SPDLOG_INFO("[VR] Secondary UI source changed while resolving, dropping the old attempt");
+            SPDLOG_INFO("[VR] UI plane {} source changed while resolving, dropping the old attempt", plane);
             return true;
         }
 
@@ -2025,44 +2097,46 @@ void VR::set_secondary_ui_source(sdk::UTexture* tex) {
         // Giving up rather than retrying: the object is gone for good, and the script hands over a fresh target when the
         // next level has one.
         if (!is_ui_source_alive(plane)) {
-            SPDLOG_INFO("[VR] Secondary UI source died before it resolved -- dropping it");
+            SPDLOG_INFO("[VR] UI plane {} source died before it resolved -- dropping it", plane);
             drop_ui_source(plane);
 
             return true;
         }
 
         if (!sdk::UTexture::update_render_resource_offset_texture2d(tex)) {
-            SPDLOG_INFO_ONCE("[VR] Secondary UI source has no resource yet, will keep trying");
+            SPDLOG_INFO_ONCE("[VR] UI plane {} source has no resource yet, will keep trying", plane);
             return false;
         }
 
         const auto rhi = tex->get_texture_rhi();
 
         if (rhi == nullptr) {
-            SPDLOG_INFO_ONCE("[VR] Secondary UI source resolved an offset but has no RHI texture yet");
+            SPDLOG_INFO_ONCE("[VR] UI plane {} source resolved an offset but has no RHI texture yet", plane);
             return false;
         }
 
         const auto native = rhi->get_native_resource();
 
         if (native == nullptr) {
-            SPDLOG_INFO_ONCE("[VR] Secondary UI source has an RHI texture but no native resource yet");
+            SPDLOG_INFO_ONCE("[VR] UI plane {} source has an RHI texture but no native resource yet", plane);
             return false;
         }
 
         m_ui_source_offset_ready[plane] = true;
 
-        SPDLOG_INFO("[VR] Secondary UI source is ready: rhi {:x}, native {:x}",
-            (uintptr_t)rhi, (uintptr_t)native);
+        SPDLOG_INFO("[VR] UI plane {} source is ready: rhi {:x}, native {:x}",
+            plane, (uintptr_t)rhi, (uintptr_t)native);
 
         return true;
     },
-    []() {
+    [plane]() {
         // Said out loud rather than left silent: from a script's side a texture that never resolves looks
         // exactly like a layer that was never asked for.
-        SPDLOG_ERROR("[VR] Secondary UI source never produced a native resource, giving up");
+        SPDLOG_ERROR("[VR] UI plane {} source never produced a native resource, giving up", plane);
     },
     std::chrono::seconds{5});
+
+    return true;
 }
 
 // ASKED OF THE TABLE, NOT OF THE OBJECT. Loading a save destroys the render target a script gave us, and reading a

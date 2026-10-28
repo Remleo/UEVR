@@ -19,6 +19,14 @@ links below, which all point to him.
 
 Newest first.
 
+- **UI planes of a script's own, up to four**, each with its own swapchain, made and destroyed on its own without
+  touching the others (`create_ui_plane_sized_like_game_ui`, `destroy_ui_plane`, `set_ui_plane_source`, `_distance`,
+  `_size`, `_offset`, `_follows_view`). The script plane that was always there is made only when a script asks for it.
+- **A script's UI plane shows its picture whatever its size.** A picture larger than the plane, such as a reticle on a
+  Pimax Crystal Light, used to leave the plane empty for the whole session; now it is drawn scaled down.
+- **A reticle plane stays with the picture through a scope.** While View Follows Aim holds the picture in the room, a
+  plane bound to the stage no longer travels with your head.
+- **The log says why UEVR's cursor is not seen**, for example while another program's window is in front of the game.
 - **The mouse cursor shows in the headset and reaches the whole interface**, also when the game's window is wider than
   your monitor. It stands on the interface plane where a profile holds that still.
 - **Symmetrical and Mirrored projection no longer come out stretched** after Canted has been in use.
@@ -67,7 +75,6 @@ Newest first.
   minute without a button press.
 - **Head tracking survives games whose frame number freezes or restarts.**
 - **Magnification and View Follows Aim**, with **Aim View Keeps Head Roll**.
-- **A second UI plane, fed by a script.**
 - **Lua additions**: `print` and a `log` table, aim and UI plane poses, camera freeze, holding a UI plane in place,
   flat window size, script reset from a key or a script.
 - **The log prints UEVRBackend's own address**, so a crash can be resolved against the `.pdb`.

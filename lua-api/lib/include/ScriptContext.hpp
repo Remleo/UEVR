@@ -86,6 +86,9 @@ public:
         } catch (...) {
             log_error("Unknown exception in on_script_reset");
         }
+
+        // After the scripts' own reset callbacks, which may still be using them.
+        release_ui_planes();
     }
 
     void frame() {
@@ -138,6 +141,12 @@ private:
     // Private constructor to prevent direct instantiation
     ScriptContext(lua_State* l, UEVR_PluginInitializeParam* param = nullptr);
     void initialize(std::shared_ptr<sol::state> l = nullptr);
+    void release_ui_planes();
+
+    // The UI planes this state's scripts made, destroyed on a reset (release_ui_planes): they live in C++ and would
+    // otherwise outlive the scripts that asked for them. Plane 1 counts too once set_secondary_ui_source made it.
+    std::vector<unsigned int> m_ui_planes{};
+    bool m_used_secondary_ui_source{false};
 
     static inline std::vector<void*> s_callbacks_to_remove{};
     static inline std::mutex s_callbacks_to_remove_mtx{};

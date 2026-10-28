@@ -23,6 +23,25 @@
 constexpr auto ENGINE_SRC_DEPTH = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 constexpr auto ENGINE_SRC_COLOR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
+// The UI planes' swapchains, the game's and the scripts'.
+constexpr auto UI_SWAPCHAIN_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+
+// How a script plane's source is read when it is drawn rather than copied: through its sRGB view, so that the draw
+// into the sRGB swapchain gives back the bytes a copy would have put there. A typed format without an sRGB view would
+// be encoded a second time and come out too bright, so it has no view here and is not drawn.
+static std::optional<DXGI_FORMAT> ui_source_view_format(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    default:
+        return std::nullopt;
+    }
+}
+
 namespace vrmod {
 vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     if (m_force_reset || m_last_afr_state != vr->is_using_afr()) {
@@ -389,6 +408,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         clear_rt(m_openvr.ui_tex.commands);
         m_openvr.ui_tex.commands.execute();
     } else if (runtime->is_openxr() && runtime->ready() && vr->m_openxr->frame_began) {
+        // The planes scripts asked for or let go, each made or destroyed on its own before anything is copied.
+        m_openxr.update_ui_planes();
+
         if (is_right_eye_frame) {
             if (is_2d_screen) {
                 if (is_afr) {
@@ -417,6 +439,14 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     continue;
                 }
 
+                // No swapchain, nothing to copy into: a plane the runtime refused, said in the log once when it was.
+                const auto swapchain_idx = (uint32_t)runtimes::OpenXR::ui_plane_swapchain(plane);
+                const auto plane_swapchain_it = vr->m_openxr->swapchains.find(swapchain_idx);
+
+                if (plane_swapchain_it == vr->m_openxr->swapchains.end()) {
+                    continue;
+                }
+
                 // IS IT STILL THERE, asked BEFORE the object is touched. Loading a save destroys the render target a
                 // script gave us and nothing announces it: the game came down inside this DLL on the frame after the
                 // target lost its resource, reading through a pointer to a destroyed object. The check is a lookup in
@@ -426,23 +456,57 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     continue;
                 }
 
-                const auto rhi = vr->get_ui_source(plane)->get_texture_rhi();
+                // Read once: a script's thread may take the source away between two reads of the slot.
+                const auto source = vr->get_ui_source(plane);
+
+                if (source == nullptr) {
+                    continue;
+                }
+
+                const auto rhi = source->get_texture_rhi();
                 const auto native = rhi != nullptr ? (ID3D12Resource*)rhi->get_native_resource() : nullptr;
 
                 if (native != nullptr) {
-                    // COPIED AS A REGION, NOT AS A WHOLE RESOURCE. CopyResource demands identical
-                    // dimensions, and these two are not: the swapchain is as large as the UI one because it
-                    // is created at session start, long before a script picks a source.
+                    // COPIED AS A REGION, NOT AS A WHOLE RESOURCE. CopyResource demands identical dimensions, and
+                    // these two need not be: the swapchain is the game interface's size, the source whatever size
+                    // the script's texture is.
                     //
                     // The region lands at the swapchain's origin and the layer crops to it, so the rest of
                     // the swapchain is never sampled and never needs clearing.
                     const auto desc = native->GetDesc();
-                    const auto swapchain_idx = (uint32_t)runtimes::OpenXR::ui_plane_swapchain(plane);
-                    const auto& plane_swapchain = vr->m_openxr->swapchains[swapchain_idx];
+                    const auto& plane_swapchain = plane_swapchain_it->second;
+                    const auto fits = desc.Width <= plane_swapchain.width && desc.Height <= plane_swapchain.height;
 
-                    SPDLOG_INFO_ONCE("[VR] UI plane {} source is {}x{} format {}, swapchain is {}x{}",
-                        plane, (uint32_t)desc.Width, (uint32_t)desc.Height, (uint32_t)desc.Format,
-                        plane_swapchain.width, plane_swapchain.height);
+                    // Logged whenever the source changes, since its size is the engine's to choose: one profile's
+                    // reticle source read 1920x1440 on a Quest and 4474x3355 on a Pimax Crystal Light, larger than
+                    // its 3728x2796 swapchain.
+                    const std::array<uint64_t, 4> source_key{(uint64_t)native, desc.Width, desc.Height, (uint64_t)desc.Format};
+
+                    if (m_ui_source_logged[plane] != source_key) {
+                        m_ui_source_logged[plane] = source_key;
+                        spdlog::info("[VR] UI plane {} source {:x} is {}x{} format {}, swapchain is {}x{}: {}",
+                            plane, (uint64_t)native, (uint32_t)desc.Width, (uint32_t)desc.Height, (uint32_t)desc.Format,
+                            plane_swapchain.width, plane_swapchain.height, fits ? "copied" : "drawn scaled down to fit");
+                    }
+
+                    // LARGER THAN ITS SWAPCHAIN, IT IS DRAWN SCALED DOWN, NOT COPIED. A copy region past the
+                    // destination's edge is invalid: the command list could not even be closed, every frame, and the
+                    // plane showed nothing.
+                    if (!fits) {
+                        std::optional<std::array<uint32_t, 2>> drawn{};
+
+                        m_openxr.copy(swapchain_idx, nullptr,
+                            [&](d3d12::CommandContext& commands, ID3D12Resource* image) {
+                                drawn = draw_ui_source_scaled(swapchain_idx, commands, image, native);
+                            },
+                            std::nullopt, ENGINE_SRC_COLOR);
+
+                        if (drawn) {
+                            vr->set_ui_source_size(plane, (*drawn)[0], (*drawn)[1]);
+                        }
+
+                        continue;
+                    }
 
                     vr->set_ui_source_size(plane, (uint32_t)desc.Width, (uint32_t)desc.Height);
 
@@ -843,6 +907,125 @@ std::unique_ptr<DirectX::DX12::SpriteBatch> D3D12Component::setup_sprite_batch_p
     return batch;
 }
 
+// Draws a script plane's source into the swapchain image `image`, scaled down to fit with its proportions kept, at the
+// origin where a copy would have put it, and returns the size drawn. Nothing is returned, and the image is cleared,
+// when the source cannot be drawn. The source is expected readable by a pixel shader, as the copy path expects it
+// readable by a copy (ENGINE_SRC_COLOR covers both); the image is left a render target, as the copy leaves it.
+//
+// The shader resource view is written anew at every draw, into a slot of this image's own: a view kept from an
+// earlier frame would point at a resource the engine may have freed since, and the slot is safe to rewrite because
+// OpenXR::copy waits for the image's previous commands before handing it over.
+std::optional<std::array<uint32_t, 2>> D3D12Component::draw_ui_source_scaled(uint32_t swapchain_idx,
+    d3d12::CommandContext& commands, ID3D12Resource* image, ID3D12Resource* source)
+{
+    auto device = g_framework->get_d3d12_hook()->get_device();
+    auto ctx_it = m_openxr.contexts.find(swapchain_idx);
+
+    if (device == nullptr || image == nullptr || source == nullptr || ctx_it == m_openxr.contexts.end()) {
+        return std::nullopt;
+    }
+
+    auto& ctx = ctx_it->second;
+    size_t index = 0;
+
+    while (index < ctx.textures.size() && ctx.textures[index].texture != image) {
+        ++index;
+    }
+
+    if (index == ctx.textures.size()) {
+        return std::nullopt;
+    }
+
+    ctx.draw_rtvs.resize(ctx.textures.size());
+    ctx.draw_srvs.resize(ctx.textures.size());
+
+    try {
+        if (ctx.draw_rtvs[index] == nullptr) {
+            ctx.draw_rtvs[index] = std::make_unique<DirectX::DescriptorHeap>(device,
+                D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 1);
+
+            D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
+            rtv_desc.Format = UI_SWAPCHAIN_FORMAT;
+            rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+            device->CreateRenderTargetView(image, &rtv_desc, ctx.draw_rtvs[index]->GetCpuHandle(0));
+        }
+
+        if (ctx.draw_srvs[index] == nullptr) {
+            ctx.draw_srvs[index] = std::make_unique<DirectX::DescriptorHeap>(device,
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 1);
+        }
+
+        if (m_ui_source_batch == nullptr) {
+            DirectX::SpriteBatchPipelineStateDescription pd{DirectX::RenderTargetState{UI_SWAPCHAIN_FORMAT, DXGI_FORMAT_UNKNOWN}};
+            auto& bdrt = pd.blendDesc.RenderTarget[0];
+            bdrt.BlendEnable = TRUE;
+            bdrt.SrcBlend = D3D12_BLEND_ONE;
+            bdrt.DestBlend = D3D12_BLEND_ZERO;
+            bdrt.BlendOp = D3D12_BLEND_OP_ADD;
+            bdrt.SrcBlendAlpha = D3D12_BLEND_ONE;
+            bdrt.DestBlendAlpha = D3D12_BLEND_ZERO;
+            bdrt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            bdrt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+            m_ui_source_batch = setup_sprite_batch_pso(UI_SWAPCHAIN_FORMAT, {}, {}, pd);
+        }
+    } catch (...) {
+        SPDLOG_ERROR_ONCE("[VR] A UI plane's source could not be drawn: its descriptors or its pipeline could not be made");
+        return std::nullopt;
+    }
+
+    const auto rtv = ctx.draw_rtvs[index]->GetCpuHandle(0);
+    const auto image_desc = image->GetDesc();
+    const auto source_desc = source->GetDesc();
+    const auto view_format = ui_source_view_format(source_desc.Format);
+
+    if (!view_format || m_ui_source_batch == nullptr) {
+        SPDLOG_ERROR_ONCE("[VR] A UI plane's source in format {} cannot be drawn, the plane stays empty", (uint32_t)source_desc.Format);
+
+        const float transparent[4]{0.0f, 0.0f, 0.0f, 0.0f};
+        commands.clear_rtv(image, rtv, transparent, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        return std::nullopt;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+    srv_desc.Format = *view_format;
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv_desc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(source, &srv_desc, ctx.draw_srvs[index]->GetCpuHandle(0));
+
+    const auto scale = std::min((double)image_desc.Width / (double)source_desc.Width, (double)image_desc.Height / (double)source_desc.Height);
+    const auto width = std::max<uint32_t>(1, (uint32_t)((double)source_desc.Width * scale));
+    const auto height = std::max<uint32_t>(1, (uint32_t)((double)source_desc.Height * scale));
+
+    D3D12_VIEWPORT viewport{};
+    viewport.Width = (float)image_desc.Width;
+    viewport.Height = (float)image_desc.Height;
+    viewport.MinDepth = D3D12_MIN_DEPTH;
+    viewport.MaxDepth = D3D12_MAX_DEPTH;
+    const D3D12_RECT scissor{0, 0, (LONG)image_desc.Width, (LONG)image_desc.Height};
+
+    auto cmd_list = commands.cmd_list.Get();
+    cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    cmd_list->RSSetViewports(1, &viewport);
+    cmd_list->RSSetScissorRects(1, &scissor);
+
+    ID3D12DescriptorHeap* heaps[]{ctx.draw_srvs[index]->Heap()};
+    cmd_list->SetDescriptorHeaps(1, heaps);
+
+    m_ui_source_batch->SetViewport(viewport);
+    m_ui_source_batch->Begin(cmd_list, DirectX::DX12::SpriteSortMode::SpriteSortMode_Immediate);
+    m_ui_source_batch->Draw(ctx.draw_srvs[index]->GetGpuHandle(0),
+        DirectX::XMUINT2{(uint32_t)source_desc.Width, (uint32_t)source_desc.Height},
+        RECT{0, 0, (LONG)width, (LONG)height},
+        DirectX::Colors::White);
+    m_ui_source_batch->End();
+
+    commands.has_commands = true;
+
+    return std::array<uint32_t, 2>{width, height};
+}
+
 void D3D12Component::draw_spectator_view(ID3D12GraphicsCommandList* command_list, bool is_right_eye_frame) {
     if (command_list == nullptr || m_game_ui_tex.texture == nullptr) {
         return;
@@ -1157,6 +1340,7 @@ void D3D12Component::on_reset(VR* vr) {
     m_backbuffer_batch.reset();
     m_game_batch.reset();
     m_ui_batch_alpha_invert.reset();
+    m_ui_source_batch.reset();
     m_graphics_memory.reset();
 
     if (runtime->is_openxr() && runtime->loaded) {
@@ -1406,6 +1590,160 @@ void D3D12Component::OpenXR::initialize(XrSessionCreateInfo& session_info) {
     session_info.next = &this->binding;
 }
 
+std::optional<std::string> D3D12Component::OpenXR::create_swapchain(uint32_t i, const XrSwapchainCreateInfo& swapchain_create_info, const D3D12_RESOURCE_DESC& desc) {
+    std::scoped_lock _{this->mtx};
+
+    auto& vr = VR::get();
+    auto& openxr = vr->m_openxr;
+    auto device = g_framework->get_d3d12_hook()->get_device();
+
+    // Create the swapchain.
+    runtimes::OpenXR::Swapchain swapchain{};
+    swapchain.width = swapchain_create_info.width;
+    swapchain.height = swapchain_create_info.height;
+
+    if (const auto result = xrCreateSwapchain(openxr->session, &swapchain_create_info, &swapchain.handle); result != XR_SUCCESS) {
+        spdlog::error("[VR] D3D12: Failed to create swapchain {}: {}", i, openxr->get_result_string(result));
+        return "Failed to create swapchain.";
+    }
+
+    vr->m_openxr->swapchains[i] = swapchain;
+
+    uint32_t image_count{};
+    auto result = xrEnumerateSwapchainImages(swapchain.handle, 0, &image_count, nullptr);
+
+    if (result != XR_SUCCESS) {
+        spdlog::error("[VR] Failed to enumerate swapchain images.");
+        return "Failed to enumerate swapchain images.";
+    }
+
+    SPDLOG_INFO("[VR] Runtime wants {} images for swapchain {}", image_count, i);
+
+    auto& ctx = this->contexts[i];
+
+    ctx.textures.clear();
+    ctx.textures.resize(image_count);
+    ctx.texture_contexts.clear();
+    ctx.texture_contexts.resize(image_count);
+    ctx.draw_rtvs.clear();
+    ctx.draw_srvs.clear();
+
+    for (uint32_t j = 0; j < image_count; ++j) {
+        ctx.textures[j] = {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
+        ctx.texture_contexts[j] = std::make_unique<d3d12::TextureContext>();
+        ctx.texture_contexts[j]->commands.setup((std::wstring{L"OpenXR commands "} + std::to_wstring(i) + L" " + std::to_wstring(j)).c_str());
+    }
+
+    result = xrEnumerateSwapchainImages(swapchain.handle, image_count, &image_count, (XrSwapchainImageBaseHeader*)&ctx.textures[0]);
+
+    if (result != XR_SUCCESS) {
+        spdlog::error("[VR] Failed to enumerate swapchain images after texture creation.");
+        return "Failed to enumerate swapchain images after texture creation.";
+    }
+
+    for (uint32_t j = 0; j < image_count; ++j) {
+        ctx.textures[j].texture->AddRef();
+        const auto ref_count = ctx.textures[j].texture->Release();
+
+        spdlog::info("[VR] AFTER Swapchain texture {} {} ref count: {}", i, j, ref_count);
+    }
+
+    if (swapchain_create_info.createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) {
+        for (uint32_t j = 0; j < image_count; ++j) {
+            XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            wait_info.timeout = XR_INFINITE_DURATION;
+            XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+
+            uint32_t index{};
+            xrAcquireSwapchainImage(swapchain.handle, &acquire_info, &index);
+            xrWaitSwapchainImage(swapchain.handle, &wait_info);
+
+            auto& texture_ctx = ctx.texture_contexts[index];
+            texture_ctx->texture = ctx.textures[index].texture;
+
+            // Depth stencil textures don't need an RTV.
+            if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
+                if (ctx.texture_contexts[index]->create_rtv(device, (DXGI_FORMAT)swapchain_create_info.format)) {
+                    const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                    texture_ctx->commands.clear_rtv(ctx.textures[index].texture, texture_ctx->get_rtv(), clear_color, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    texture_ctx->commands.execute();
+                    texture_ctx->commands.wait(100);
+                } else {
+                    spdlog::error("[VR] Failed to create RTV for swapchain image {}.", index);
+                }
+            }
+
+            texture_ctx->texture.Reset();
+            texture_ctx->rtv_heap.reset();
+
+            xrReleaseSwapchainImage(swapchain.handle, &release_info);
+        }
+    }
+
+    return std::nullopt;
+}
+
+// A script plane's swapchain, made on its own with what the game's interface swapchain was made with: the swapchains
+// already there are not touched. The handle is logged so a log can show which swapchains were made when.
+std::optional<std::string> D3D12Component::OpenXR::create_ui_plane_swapchain(size_t plane) {
+    std::scoped_lock _{this->mtx};
+
+    auto& vr = VR::get();
+    std::scoped_lock __{vr->m_openxr->swapchain_mtx};
+
+    const auto i = (uint32_t)runtimes::OpenXR::ui_plane_swapchain(plane);
+
+    if (auto err = create_swapchain(i, this->ui_create_info, this->ui_desc)) {
+        // Whatever was made before the failure goes, or the plane would look made with half a swapchain.
+        destroy_swapchain(i);
+        this->ui_planes_refused.insert(plane);
+
+        spdlog::error("[VR] UI plane {}: its swapchain could not be made, the plane stays empty", plane);
+
+        return err;
+    }
+
+    const auto& made = vr->m_openxr->swapchains[i];
+    spdlog::info("[VR] UI plane {}: swapchain {} made on its own, {}x{}, handle {:x}",
+        plane, i, made.width, made.height, (uintptr_t)made.handle);
+
+    return std::nullopt;
+}
+
+// THE SCRIPT PLANES' SWAPCHAINS, MADE AND DESTROYED ONE BY ONE to match the planes scripts have asked for. Run on the
+// render thread before anything is copied, so a plane made this frame is filled and submitted this frame. Nothing here
+// touches another swapchain: everything is remade only where it always was, when the game's window or the headset
+// changes size, and create_swapchains then makes the planes with the rest.
+void D3D12Component::OpenXR::update_ui_planes() {
+    std::scoped_lock _{this->mtx};
+
+    auto& vr = VR::get();
+
+    // Before the session's own swapchains there is no size to make a plane at.
+    if (!this->contexts.contains((uint32_t)runtimes::OpenXR::SwapchainIndex::UI)) {
+        return;
+    }
+
+    for (size_t plane = OverlayComponent::PLANE_SCRIPT; plane < OverlayComponent::PLANE_COUNT; ++plane) {
+        const auto i = (uint32_t)runtimes::OpenXR::ui_plane_swapchain(plane);
+        const auto wanted = vr->is_ui_plane_made(plane);
+        const auto exists = this->contexts.contains(i);
+
+        if (wanted && !exists && !this->ui_planes_refused.contains(plane)) {
+            create_ui_plane_swapchain(plane);
+        } else if (!wanted && exists) {
+            destroy_swapchain(i);
+            spdlog::info("[VR] UI plane {}: swapchain {} destroyed on its own", plane, i);
+        }
+
+        // A plane its script destroyed may be asked for again, and gets a fresh try then.
+        if (!wanted) {
+            this->ui_planes_refused.erase(plane);
+        }
+    }
+}
+
 std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
     std::scoped_lock _{this->mtx};
 
@@ -1447,92 +1785,6 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
     auto& openxr = vr->m_openxr;
 
     this->contexts.clear();
-
-    auto create_swapchain = [&](uint32_t i, const XrSwapchainCreateInfo& swapchain_create_info, const D3D12_RESOURCE_DESC& desc) -> std::optional<std::string> {
-        // Create the swapchain.
-        runtimes::OpenXR::Swapchain swapchain{};
-        swapchain.width = swapchain_create_info.width;
-        swapchain.height = swapchain_create_info.height;
-
-        if (xrCreateSwapchain(openxr->session, &swapchain_create_info, &swapchain.handle) != XR_SUCCESS) {
-            spdlog::error("[VR] D3D12: Failed to create swapchain.");
-            return "Failed to create swapchain.";
-        }
-
-        vr->m_openxr->swapchains[i] = swapchain;
-
-        uint32_t image_count{};
-        auto result = xrEnumerateSwapchainImages(swapchain.handle, 0, &image_count, nullptr);
-
-        if (result != XR_SUCCESS) {
-            spdlog::error("[VR] Failed to enumerate swapchain images.");
-            return "Failed to enumerate swapchain images.";
-        }
-
-        SPDLOG_INFO("[VR] Runtime wants {} images for swapchain {}", image_count, i);
-
-        auto& ctx = this->contexts[i];
-
-        ctx.textures.clear();
-        ctx.textures.resize(image_count);
-        ctx.texture_contexts.clear();
-        ctx.texture_contexts.resize(image_count);
-
-        for (uint32_t j = 0; j < image_count; ++j) {
-            ctx.textures[j] = {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR};
-            ctx.texture_contexts[j] = std::make_unique<d3d12::TextureContext>();
-            ctx.texture_contexts[j]->commands.setup((std::wstring{L"OpenXR commands "} + std::to_wstring(i) + L" " + std::to_wstring(j)).c_str());
-        }
-
-        result = xrEnumerateSwapchainImages(swapchain.handle, image_count, &image_count, (XrSwapchainImageBaseHeader*)&ctx.textures[0]);
-        
-        if (result != XR_SUCCESS) {
-            spdlog::error("[VR] Failed to enumerate swapchain images after texture creation.");
-            return "Failed to enumerate swapchain images after texture creation.";
-        }
-
-        for (uint32_t j = 0; j < image_count; ++j) {
-            ctx.textures[j].texture->AddRef();
-            const auto ref_count = ctx.textures[j].texture->Release();
-
-            spdlog::info("[VR] AFTER Swapchain texture {} {} ref count: {}", i, j, ref_count);
-        }
-
-        if (swapchain_create_info.createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) {
-            for (uint32_t j = 0; j < image_count; ++j) {
-                XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-                XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-                wait_info.timeout = XR_INFINITE_DURATION;
-                XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-
-                uint32_t index{};
-                xrAcquireSwapchainImage(swapchain.handle, &acquire_info, &index);
-                xrWaitSwapchainImage(swapchain.handle, &wait_info);
-
-                auto& texture_ctx = ctx.texture_contexts[index];
-                texture_ctx->texture = ctx.textures[index].texture;
-
-                // Depth stencil textures don't need an RTV.
-                if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
-                    if (ctx.texture_contexts[index]->create_rtv(device, (DXGI_FORMAT)swapchain_create_info.format)) {
-                        const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                        texture_ctx->commands.clear_rtv(ctx.textures[index].texture, texture_ctx->get_rtv(), clear_color, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                        texture_ctx->commands.execute();
-                        texture_ctx->commands.wait(100);
-                    } else {
-                        spdlog::error("[VR] Failed to create RTV for swapchain image {}.", index);
-                    }
-                }
-
-                texture_ctx->texture.Reset();
-                texture_ctx->rtv_heap.reset();
-
-                xrReleaseSwapchainImage(swapchain.handle, &release_info);
-            }
-        }
-
-        return std::nullopt;
-    };
 
     const auto double_wide_multiple = vr->is_using_afr() ? 1 : 2;
 
@@ -1595,12 +1847,12 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
     }
 
     auto desktop_rt_swapchain_create_info = standard_swapchain_create_info;
-    desktop_rt_swapchain_create_info.format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    desktop_rt_swapchain_create_info.format = UI_SWAPCHAIN_FORMAT;
     desktop_rt_swapchain_create_info.width = g_framework->get_d3d12_rt_size().x;
     desktop_rt_swapchain_create_info.height = g_framework->get_d3d12_rt_size().y;
 
     auto desktop_rt_desc = backbuffer_desc;
-    desktop_rt_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    desktop_rt_desc.Format = UI_SWAPCHAIN_FORMAT;
     desktop_rt_desc.Width = g_framework->get_d3d12_rt_size().x;
     desktop_rt_desc.Height = g_framework->get_d3d12_rt_size().y;
 
@@ -1612,12 +1864,8 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
         return err;
     }
 
-    // The script-fed UI plane's texture. Created unconditionally, the same size as the others, so a script can
-    // turn that plane on at any moment without a swapchain rebuild mid-session. Nothing is copied into it and
-    // nothing is submitted from it until a script sets a source.
-    if (auto err = create_swapchain((uint32_t)runtimes::OpenXR::SwapchainIndex::UI_SECONDARY, desktop_rt_swapchain_create_info, desktop_rt_desc)) {
-        return err;
-    }
+    this->ui_create_info = desktop_rt_swapchain_create_info;
+    this->ui_desc = desktop_rt_desc;
 
     if (auto err = create_swapchain((uint32_t)runtimes::OpenXR::SwapchainIndex::UI_RIGHT, desktop_rt_swapchain_create_info, desktop_rt_desc)) {
         return err;
@@ -1625,6 +1873,16 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
 
     if (auto err = create_swapchain((uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI, desktop_rt_swapchain_create_info, desktop_rt_desc)) {
         return err;
+    }
+
+    // The planes scripts have asked for, remade with the rest and at the new size when this is a resize. A plane the
+    // runtime refuses is said out loud and stays empty; the session goes on without it.
+    this->ui_planes_refused.clear();
+
+    for (size_t plane = OverlayComponent::PLANE_SCRIPT; plane < OverlayComponent::PLANE_COUNT; ++plane) {
+        if (vr->is_ui_plane_made(plane)) {
+            create_ui_plane_swapchain(plane);
+        }
     }
 
     // Depth textures
@@ -1721,20 +1979,43 @@ void D3D12Component::OpenXR::destroy_swapchains() {
 
     this->wait_for_all_copies();
 
-    for (auto& it : this->contexts) {
-        auto& ctx = it.second;
-        const auto i = it.first;
+    std::vector<uint32_t> indices{};
 
-        //ctx.texture_contexts.clear();
+    for (const auto& it : this->contexts) {
+        indices.push_back(it.first);
+    }
+
+    for (const auto i : indices) {
+        destroy_swapchain(i);
+    }
+
+    this->contexts.clear();
+    vr->m_openxr->swapchains.clear();
+}
+
+// One swapchain and its images, once the copies into it are done. The others are not touched.
+void D3D12Component::OpenXR::destroy_swapchain(uint32_t i) {
+    std::scoped_lock _{this->mtx};
+
+    auto& vr = VR::get();
+    std::scoped_lock __{vr->m_openxr->swapchain_mtx};
+
+    std::vector<ID3D12Resource*> needs_release{};
+    const auto had_context = this->contexts.contains(i);
+
+    if (auto it = this->contexts.find(i); it != this->contexts.end()) {
+        auto& ctx = it->second;
+
         for (auto& texture_context : ctx.texture_contexts) {
             if (texture_context != nullptr) {
+                texture_context->commands.wait(INFINITE);
                 texture_context->reset();
             }
         }
 
         ctx.texture_contexts.clear();
-
-        std::vector<ID3D12Resource*> needs_release{};
+        ctx.draw_rtvs.clear();
+        ctx.draw_srvs.clear();
 
         for (auto& tex : ctx.textures) {
             if (tex.texture != nullptr) {
@@ -1743,31 +2024,31 @@ void D3D12Component::OpenXR::destroy_swapchains() {
             }
         }
 
-        if (vr->m_openxr->swapchains.contains(i)) {
-            const auto result = xrDestroySwapchain(vr->m_openxr->swapchains[i].handle);
-
-            if (result != XR_SUCCESS) {
-                spdlog::error("[VR] Failed to destroy swapchain {}.", i);
-            } else {
-                spdlog::info("[VR] Destroyed swapchain {}.", i);
-            }
-        } else {
-            spdlog::error("[VR] Swapchain {} does not exist.", i);
-        }
-
-        for (auto& tex : needs_release) {
-            if (const auto ref_count = tex->Release(); ref_count != 0) {
-                spdlog::info("[VR] Memory leak detected in swapchain texture {} ({} refs)", i, ref_count);
-            } else {
-                spdlog::info("[VR] Swapchain texture {} released.", i);
-            }
-        }
-        
         ctx.textures.clear();
+        this->contexts.erase(it);
     }
 
-    this->contexts.clear();
-    vr->m_openxr->swapchains.clear();
+    if (vr->m_openxr->swapchains.contains(i)) {
+        const auto result = xrDestroySwapchain(vr->m_openxr->swapchains[i].handle);
+
+        if (result != XR_SUCCESS) {
+            spdlog::error("[VR] Failed to destroy swapchain {}.", i);
+        } else {
+            spdlog::info("[VR] Destroyed swapchain {}.", i);
+        }
+
+        vr->m_openxr->swapchains.erase(i);
+    } else if (had_context) {
+        spdlog::error("[VR] Swapchain {} does not exist.", i);
+    }
+
+    for (auto& tex : needs_release) {
+        if (const auto ref_count = tex->Release(); ref_count != 0) {
+            spdlog::info("[VR] Memory leak detected in swapchain texture {} ({} refs)", i, ref_count);
+        } else {
+            spdlog::info("[VR] Swapchain texture {} released.", i);
+        }
+    }
 }
 
 void D3D12Component::OpenXR::copy(

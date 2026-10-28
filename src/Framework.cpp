@@ -891,6 +891,81 @@ void Framework::block_set_cursor_pos(bool on) {
     }
 }
 
+// A program's window, named by its exe and its class, never its title: a title may carry a player's documents, and logs
+// go into public issues.
+static std::string describe_window(HWND wnd) {
+    if (wnd == nullptr) {
+        return "no window at all";
+    }
+
+    char window_class[128]{};
+    GetClassNameA(wnd, window_class, sizeof(window_class));
+
+    DWORD pid{0};
+    GetWindowThreadProcessId(wnd, &pid);
+
+    std::string exe{"?"};
+
+    if (const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid); process != nullptr) {
+        wchar_t path[MAX_PATH]{};
+        DWORD length{MAX_PATH};
+
+        if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+            exe = utility::narrow(std::filesystem::path{path}.filename().wstring());
+        }
+
+        CloseHandle(process);
+    }
+
+    return std::format("{} (window class {}, process {}{})", exe, window_class, pid,
+                       pid == GetCurrentProcessId() ? ", the game's own" : "");
+}
+
+// WHY A CURSOR THAT IS ON CAN STILL BE MISSING FROM THE HEADSET, said on each change of the reason. ImGui takes the
+// mouse's place only while the game's window is in front (ImGui_ImplWin32_UpdateMousePos), and with no place it draws no
+// cursor (RenderMouseCursor skips a rect off every viewport): another program brought forward -- a headset's own menu, an
+// overlay, the taskbar -- leaves Always Show Cursor on and the headset without a cursor until the game is in front again.
+// A place past the picture's edge is drawn off it as well. Presumably what a Pimax player saw in a body search while the
+// headset lost focus twice (how to check: these lines in such a log).
+void Framework::log_cursor_visibility() {
+    const auto& io = ImGui::GetIO();
+
+    if (!io.MouseDrawCursor) {
+        m_cursor_visibility.clear();
+        return;
+    }
+
+    std::string reason{};
+    std::string text{};
+
+    if (ImGui::IsMousePosValid(&io.MousePos)) {
+        const auto inside = io.MousePos.x >= 0.0f && io.MousePos.y >= 0.0f &&
+                            io.MousePos.x < io.DisplaySize.x && io.MousePos.y < io.DisplaySize.y;
+
+        reason = inside ? "drawn" : "past the edge";
+        text = std::format("{} at {:.0f}, {:.0f} of a {:.0f} x {:.0f} picture",
+                           inside ? "drawn" : "NOT SEEN, the mouse is past the picture's edge",
+                           io.MousePos.x, io.MousePos.y, io.DisplaySize.x, io.DisplaySize.y);
+    } else {
+        const auto front = GetForegroundWindow();
+
+        if (front != nullptr && (front == m_wnd || IsChild(front, m_wnd))) {
+            reason = "unread";
+            text = "NOT DRAWN, the mouse's place could not be read with the game's window in front";
+        } else {
+            reason = std::format("behind {:x}", (uintptr_t)front);
+            text = std::format("NOT DRAWN, the game's window is not in front, {} is", describe_window(front));
+        }
+    }
+
+    if (reason == m_cursor_visibility) {
+        return;
+    }
+
+    m_cursor_visibility = reason;
+    spdlog::info("[Framework] UEVR's cursor {}", text);
+}
+
 bool Framework::cursor_map(RECT& client, RECT& visible) const {
     // Only while UEVR draws a cursor in the headset (its own menu, or Always Show Cursor): the stretch is for that cursor.
     // With none drawn the flat mirror is the only place a cursor is seen, and there the hardware cursor should sit over
@@ -1416,6 +1491,7 @@ void Framework::draw_ui() {
 
     ImGui::GetIO().MouseDrawCursor = m_draw_ui || FrameworkConfig::get()->is_always_show_cursor();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange; // causes bugs with the cursor
+    log_cursor_visibility();
 
     if (!m_draw_ui) {
         // The game may move the cursor only while UEVR's is not drawn over it.

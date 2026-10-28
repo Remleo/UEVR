@@ -648,21 +648,36 @@ public:
         return (std::chrono::steady_clock::now() - m_last_game_frame_advance) >= std::chrono::milliseconds(250);
     }
 
-    // The source for a script-fed UI plane: a render target a script hands us, usually the one a
-    // UWidgetComponent draws its widget into.
+    // A UI PLANE A SCRIPT ASKS FOR, with a swapchain of its own the size of the game's interface -- the name says so,
+    // because a plane of another size would be another call. Returns the plane, or 0 when every script plane is taken.
+    // The swapchain is made on the render thread, on its own: the swapchains already there are left as they are. A
+    // resize of the game's window remakes it with the rest, at the new size. The plane starts where the game's plane
+    // stands, and shows nothing until it has a source.
+    size_t create_ui_plane_sized_like_game_ui();
+
+    // The plane and its swapchain go; the swapchains of the others stay. False for a plane that was not made.
+    bool destroy_ui_plane(size_t plane);
+
+    bool is_ui_plane_made(size_t plane) const {
+        return plane >= vrmod::OverlayComponent::PLANE_SCRIPT && plane < m_ui_plane_made.size() && m_ui_plane_made[plane].load();
+    }
+
+    // The source for a script plane: a render target a script hands us, usually the one a UWidgetComponent draws its
+    // widget into. Null hides the plane and keeps its swapchain.
     //
     // Held as sdk::UTexture because that is the level the SDK can walk down from: get_texture_rhi() and
     // then get_native_resource(). The offset that walk needs is resolved lazily on the render thread, the
     // same way the scene capture resolves it, so handing a texture over from a script never touches
     // rendering state directly.
     //
-    // Null is the normal state. With no source, that plane is never built and never submitted, and nothing
-    // about the existing behaviour changes.
-    //
     // INDEXED BY PLANE, like every other value a plane is placed by. Index 0 is the interface the game draws
     // and the engine path fills it, so its slot stays null forever -- and that null is what tells the
-    // placement code to use the whole swapchain for it. One rule, read by index, instead of the second plane
+    // placement code to use the whole swapchain for it. One rule, read by index, instead of the script planes
     // being a special case everywhere.
+    bool set_ui_plane_source(size_t plane, sdk::UTexture* tex);
+
+    // The first script plane, made the first time it is given a source, and placed by the UI_Secondary_* config keys
+    // rather than from the game's plane -- the way profiles written before planes were asked for use it.
     void set_secondary_ui_source(sdk::UTexture* tex);
 
     sdk::UTexture* get_ui_source(size_t plane) const {
@@ -689,9 +704,9 @@ public:
 
     // The source's own pixel size, published by whoever copies it so its plane can crop to it.
     //
-    // Swapchains are created once at session start, before any script exists, so a script-fed plane gets one
-    // as large as the game's. Its source is almost always smaller, and submitting the whole swapchain would
-    // show that difference as empty space around the picture -- which reads as "the layer is tiny".
+    // A script plane's swapchain is the game interface's size, and its source is almost always smaller: submitting
+    // the whole swapchain would show that difference as empty space around the picture -- which reads as "the layer
+    // is tiny".
     //
     // Zero means "nothing copied yet", which is also the permanent answer for the game's own plane.
     void set_ui_source_size(size_t plane, uint32_t w, uint32_t h) {
@@ -1388,7 +1403,12 @@ private:
     // timestamps above it: a torn read costs one frame sourcing the wrong eye texture.
     std::chrono::steady_clock::time_point m_last_game_frame_advance{std::chrono::steady_clock::now()};
 
-    // Script-fed UI plane sources, by plane index. See set_secondary_ui_source. Sized by the overlay's own
+    // Which script planes are made, written by a script's thread and read by the render thread, which makes and
+    // destroys their swapchains to match. Slots are taken and given back under the mutex.
+    std::array<std::atomic<bool>, vrmod::OverlayComponent::PLANE_COUNT> m_ui_plane_made{};
+    std::mutex m_ui_plane_mtx{};
+
+    // Script-fed UI plane sources, by plane index. See set_ui_plane_source. Sized by the overlay's own
     // count rather than a second constant here: two numbers for one thing is one number too many.
     std::array<sdk::UTexture*, vrmod::OverlayComponent::PLANE_COUNT> m_ui_source{};
     std::array<bool, vrmod::OverlayComponent::PLANE_COUNT> m_ui_source_offset_ready{};

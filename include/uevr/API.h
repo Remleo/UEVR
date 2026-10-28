@@ -648,14 +648,13 @@ typedef struct {
     void (*save_config)();
     void (*reload_config)();
 
-    /* The source for the secondary UI layer: a texture, normally the render target a UWidgetComponent
-       draws its widget into. Null takes the layer away.
+    /* The source for UI plane 1: a texture, normally the render target a UWidgetComponent draws its widget into. Null
+       takes the layer away. The plane is made on its first source, sized like the game's interface; everything else
+       about it is a config value (UI_Secondary_*), reachable through set_mod_value. Kept for callers written before
+       planes were made on request -- create_ui_plane_sized_like_game_ui and set_ui_plane_source are the way now.
 
        Appended at the end of the struct on purpose -- inserting anywhere else would shift every field
-       after it and break plugins built against an older header.
-
-       Everything else about the layer is a config value (UI_Secondary_*), reachable through
-       set_mod_value, because only a pointer cannot travel as a string. */
+       after it and break plugins built against an older header. */
     void (*set_secondary_ui_source)(UEVR_UObjectHandle texture);
 
     /* Resize the game's FLAT window so its CLIENT AREA is exactly width by height, and report back what it
@@ -675,7 +674,7 @@ typedef struct {
     void (*set_flat_window_size)(unsigned int width, unsigned int height, unsigned int* out_width, unsigned int* out_height);
 
     /* Where a UI plane was last PUT, in the space it was submitted in. Plane 0 is the interface the game draws,
-       plane 1 is the one a script feeds. Returns the space the pose is expressed in, because the pose means
+       planes from 1 on are the ones callers make. Returns the space the pose is expressed in, because the pose means
        nothing without it: 0 the plane was not placed this frame (no answer), 1 view space -- head locked, so the
        pose is relative to the head, 2 stage space -- the pose is relative to the standing origin.
 
@@ -731,7 +730,7 @@ typedef struct {
     void (*set_camera_freeze)(bool position, bool rotation);
 
     /* Hold a UI plane where it hangs on the headset right now, or let it go. Plane 0 is the interface the game
-       draws, plane 1 the one a script feeds. Held, the plane stands in the stage exactly as it stood on the head at
+       draws, planes from 1 on the ones callers make. Held, the plane stands in the stage exactly as it stood on the head at
        that moment -- place, turn, tilt and roll -- and still takes its distance, size and offsets, so a script can
        change those while it is held. A hold asked for while one is on keeps the pose it took.
 
@@ -764,6 +763,39 @@ typedef struct {
        Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
        plugins built against an older header. */
     void (*set_two_handed_aim_offset)(const UEVR_Vector3f* offset);
+
+    /* A UI plane of the caller's own: a quad layer with a swapchain the size of the game's interface (get_ui_width by
+       get_ui_height), remade at the new size when the game's window is resized. The size is in the name because a
+       plane of another size would be another call, not a missing argument. Returns the plane, 1 or more, or 0 when
+       every plane for callers is taken (there are four). The plane starts where the game's plane stands and shows
+       nothing until it is given a source.
+
+       ITS SWAPCHAIN IS MADE ON ITS OWN, on the render thread, before the next frame is copied: the swapchains already
+       there are not remade. A destroyed plane's swapchain goes the same way. Each plane is a composition layer and a
+       swapchain of the runtime's, and both are counted -- OpenXR promises sixteen layers a frame, SteamVR allows
+       sixteen swapchains a session -- so a plane is destroyed when it is no longer wanted, not hidden for good.
+
+       Drawn by the D3D12 path under OpenXR; elsewhere the plane stays empty. Planes made through the Lua API are
+       destroyed when the scripts are reset.
+
+       Appended at the end of the struct -- inserting anywhere else would shift every field after it and break
+       plugins built against an older header. */
+    unsigned int (*create_ui_plane_sized_like_game_ui)();
+    void (*destroy_ui_plane)(unsigned int plane);
+
+    /* A plane's source: a texture, normally the render target a UWidgetComponent draws its widget into. The texture
+       may be any size; the plane shows its corner of the swapchain the texture's size, and a texture larger than the
+       swapchain is drawn scaled down to fit. Null hides the plane and keeps its swapchain. */
+    void (*set_ui_plane_source)(unsigned int plane, UEVR_UObjectHandle texture);
+
+    /* Where a plane made by create_ui_plane_* hangs: metres from the head or the standing origin, the height in metres
+       (the width follows the source's shape), the offsets along the plane's right and up, and whether it follows the
+       view or hangs in the stage through the rotation offset -- the game plane's own settings, one plane at a time.
+       Only planes from 1 on: the game's plane is placed by the player's own settings. */
+    void (*set_ui_plane_distance)(unsigned int plane, float meters);
+    void (*set_ui_plane_size)(unsigned int plane, float meters);
+    void (*set_ui_plane_offset)(unsigned int plane, float x, float y);
+    void (*set_ui_plane_follows_view)(unsigned int plane, bool follows);
 } UEVR_VRData;
 
 struct lua_State;

@@ -361,6 +361,10 @@ private:
     bool cursor_map(RECT& client, RECT& visible) const;
     bool m_cursor_hooks_tried{false};
     std::atomic<bool> m_set_cursor_pos_blocked{false};
+
+    // Why UEVR's cursor is or is not in its picture, said on each change; empty while no cursor is wanted.
+    void log_cursor_visibility();
+    std::string m_cursor_visibility{};
     std::chrono::steady_clock::time_point m_last_present_time{};
     std::chrono::steady_clock::time_point m_last_message_time{};
     std::chrono::steady_clock::time_point m_last_sendmessage_time{};

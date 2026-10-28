@@ -835,6 +835,33 @@ void OpenXR::capture_view_anchor(const std::optional<glm::quat>& head) {
     state.anchor = head.value_or(glm::identity<glm::quat>());
 }
 
+// FOR WHAT IS BUILT BEFORE THE SUBMIT: the quads go to end_frame ready made, and one that has to stand where this frame's
+// picture stands needs that frame's anchor before get_submit_state consumes the record. The same choice of record as
+// there, so the two cannot disagree on which frame it is.
+std::optional<glm::quat> OpenXR::peek_submit_anchor() {
+    std::scoped_lock _{ this->sync_assignment_mtx };
+
+    if (!this->has_render_frame_count) {
+        return std::nullopt;
+    }
+
+    const PipelineState* best = nullptr;
+
+    for (const auto& state : this->pipeline_states) {
+        if (state.projection_frame <= this->internal_render_frame_count &&
+            this->internal_render_frame_count - state.projection_frame <= 2 &&
+            (best == nullptr || state.projection_frame > best->projection_frame)) {
+            best = &state;
+        }
+    }
+
+    if (best == nullptr || !best->anchored || best->anchor_frame != best->projection_frame) {
+        return std::nullopt;
+    }
+
+    return best->anchor;
+}
+
 OpenXR::PipelineState OpenXR::get_submit_state() {
     std::scoped_lock __{ this->sync_assignment_mtx };
 
