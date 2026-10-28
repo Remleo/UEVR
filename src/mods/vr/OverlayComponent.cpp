@@ -44,6 +44,46 @@ std::optional<glm::mat4> OverlayComponent::get_held_head(size_t plane) const {
     return m_held_head[plane];
 }
 
+// Written from a script's thread and read where the layers are made, like any value set_mod_value writes: one float or
+// bool each, so a frame sees either the old value or the new one.
+void OverlayComponent::copy_placement(size_t from, size_t to) {
+    if (from >= PLANE_COUNT || to >= PLANE_COUNT) {
+        return;
+    }
+
+    m_slate_distance[to]->value() = m_slate_distance[from]->value();
+    m_slate_size[to]->value() = m_slate_size[from]->value();
+    m_slate_x_offset[to]->value() = m_slate_x_offset[from]->value();
+    m_slate_y_offset[to]->value() = m_slate_y_offset[from]->value();
+    m_ui_follows_view[to]->value() = m_ui_follows_view[from]->value();
+}
+
+// Script planes only: the game's plane is placed by the player's own settings.
+void OverlayComponent::set_plane_distance(size_t plane, float meters) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_slate_distance[plane]->value() = meters;
+    }
+}
+
+void OverlayComponent::set_plane_size(size_t plane, float meters) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_slate_size[plane]->value() = meters;
+    }
+}
+
+void OverlayComponent::set_plane_offset(size_t plane, float x, float y) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_slate_x_offset[plane]->value() = x;
+        m_slate_y_offset[plane]->value() = y;
+    }
+}
+
+void OverlayComponent::set_plane_follows_view(size_t plane, bool follows) {
+    if (plane >= PLANE_SCRIPT && plane < PLANE_COUNT) {
+        m_ui_follows_view[plane]->value() = follows;
+    }
+}
+
 std::optional<std::string> OverlayComponent::on_initialize_openvr() {
     m_overlay_data = {};
 
@@ -874,11 +914,10 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     layer.subImage.imageRect.offset.y = 0;
     layer.eyeVisibility = eye;
 
-    // CROPPED TO WHAT WAS ACTUALLY DRAWN. A plane fed by a script gets a swapchain as large as the game's,
-    // because swapchains are made at session start when no script exists to say how big the picture will be.
-    // The source is copied to the origin and is usually far smaller, so submitting the whole swapchain would
-    // ring the picture with everything else in that texture -- which is what "the reticle is tiny" looked
-    // like. The game's own plane fills its swapchain, so its rect is the whole thing.
+    // CROPPED TO WHAT WAS ACTUALLY DRAWN. A script plane's swapchain is the game interface's size, while the texture a
+    // script hands it can be any size. The source is copied to the origin and is usually far smaller, so submitting the
+    // whole swapchain would ring the picture with everything else in that texture -- which is what "the reticle is
+    // tiny" looked like. The game's own plane fills its swapchain, so its rect is the whole thing.
     const auto source_size = vr->get_ui_source_size(plane);
     const auto has_source_size = source_size[0] != 0 && source_size[1] != 0;
 

@@ -5,6 +5,7 @@
 #include <d3d12.h>
 #include <dxgi.h>
 #include <mutex>
+#include <unordered_set>
 #include <wrl.h>
 
 #define XR_USE_PLATFORM_WIN32
@@ -54,6 +55,8 @@ private:
 
     void draw_spectator_view(ID3D12GraphicsCommandList* command_list, bool is_right_eye_frame);
     void clear_backbuffer();
+    std::optional<std::array<uint32_t, 2>> draw_ui_source_scaled(uint32_t swapchain_idx,
+        d3d12::CommandContext& commands, ID3D12Resource* image, ID3D12Resource* source);
 
     template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
@@ -73,6 +76,10 @@ private:
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_backbuffer_batch{};
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_game_batch{};
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_ui_batch_alpha_invert{};
+    // Writes straight through, alpha included, into a script plane's swapchain (draw_ui_source_scaled).
+    std::unique_ptr<DirectX::DX12::SpriteBatch> m_ui_source_batch{};
+    // What a script plane's source was when it was last logged: pointer, width, height, format.
+    std::unordered_map<size_t, std::array<uint64_t, 4>> m_ui_source_logged{};
 
     ID3D12Resource* m_last_checked_native{nullptr};
 
@@ -165,6 +172,12 @@ private:
         void initialize(XrSessionCreateInfo& session_info);
         std::optional<std::string> create_swapchains();
         void destroy_swapchains();
+
+        // One swapchain at a time, for the planes scripts ask for: made and destroyed without touching the others.
+        std::optional<std::string> create_swapchain(uint32_t i, const XrSwapchainCreateInfo& swapchain_create_info, const D3D12_RESOURCE_DESC& desc);
+        void destroy_swapchain(uint32_t i);
+        std::optional<std::string> create_ui_plane_swapchain(size_t plane);
+        void update_ui_planes();
         void copy(uint32_t swapchain_idx, ID3D12Resource* src,
             std::optional<std::function<void(d3d12::CommandContext&, ID3D12Resource*)>> pre_commands = std::nullopt,
             std::optional<std::function<void(d3d12::CommandContext&)>> additional_commands = std::nullopt,
@@ -201,6 +214,10 @@ private:
         struct SwapchainContext {
             std::vector<XrSwapchainImageD3D12KHR> textures{};
             std::vector<std::unique_ptr<d3d12::TextureContext>> texture_contexts{};
+            // Per image, made the first time something is drawn into it: its render target view, and one shader
+            // resource slot rewritten at each draw for whatever is drawn from.
+            std::vector<std::unique_ptr<DirectX::DescriptorHeap>> draw_rtvs{};
+            std::vector<std::unique_ptr<DirectX::DescriptorHeap>> draw_srvs{};
             uint32_t num_textures_acquired{0};
             uint32_t last_acquired_texture{0};
             bool ever_acquired{false};
@@ -210,6 +227,15 @@ private:
         std::recursive_mutex mtx{};
         std::array<uint32_t, 2> last_resolution{};
         bool made_depth_with_null_defaults{false};
+
+        // What the game's interface swapchain was last made with: a script plane is made with the same, which is what
+        // "sized like the game's interface" means.
+        XrSwapchainCreateInfo ui_create_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        D3D12_RESOURCE_DESC ui_desc{};
+
+        // Planes whose swapchain the runtime refused, not asked for again until the plane is destroyed or everything is
+        // remade: a refusal is usually the runtime's swapchain budget, and asking every frame would not change it.
+        std::unordered_set<size_t> ui_planes_refused{};
 
         friend class D3D12Component;
     } m_openxr;

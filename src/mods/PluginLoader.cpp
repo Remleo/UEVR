@@ -1532,6 +1532,34 @@ void set_secondary_ui_source(UEVR_UObjectHandle texture) {
     VR::get()->set_secondary_ui_source((sdk::UTexture*)texture);
 }
 
+unsigned int create_ui_plane_sized_like_game_ui() {
+    return (unsigned int)VR::get()->create_ui_plane_sized_like_game_ui();
+}
+
+void destroy_ui_plane(unsigned int plane) {
+    VR::get()->destroy_ui_plane((size_t)plane);
+}
+
+void set_ui_plane_source(unsigned int plane, UEVR_UObjectHandle texture) {
+    VR::get()->set_ui_plane_source((size_t)plane, (sdk::UTexture*)texture);
+}
+
+void set_ui_plane_distance(unsigned int plane, float meters) {
+    VR::get()->get_overlay_component().set_plane_distance((size_t)plane, meters);
+}
+
+void set_ui_plane_size(unsigned int plane, float meters) {
+    VR::get()->get_overlay_component().set_plane_size((size_t)plane, meters);
+}
+
+void set_ui_plane_offset(unsigned int plane, float x, float y) {
+    VR::get()->get_overlay_component().set_plane_offset((size_t)plane, x, y);
+}
+
+void set_ui_plane_follows_view(unsigned int plane, bool follows) {
+    VR::get()->get_overlay_component().set_plane_follows_view((size_t)plane, follows);
+}
+
 // The result comes back through out parameters rather than a return value: the C API's function pointers carry no
 // way to hand back a pair. Both are optional, so a caller that does not care can pass null.
 void set_flat_window_size(unsigned int width, unsigned int height, unsigned int* out_width, unsigned int* out_height) {
@@ -1678,6 +1706,13 @@ UEVR_VRData g_vr_data {
     .set_camera_freeze = uevr::vr::set_camera_freeze,
     .set_ui_plane_held = uevr::vr::set_ui_plane_held,
     .set_two_handed_aim_offset = uevr::vr::set_two_handed_aim_offset,
+    .create_ui_plane_sized_like_game_ui = uevr::vr::create_ui_plane_sized_like_game_ui,
+    .destroy_ui_plane = uevr::vr::destroy_ui_plane,
+    .set_ui_plane_source = uevr::vr::set_ui_plane_source,
+    .set_ui_plane_distance = uevr::vr::set_ui_plane_distance,
+    .set_ui_plane_size = uevr::vr::set_ui_plane_size,
+    .set_ui_plane_offset = uevr::vr::set_ui_plane_offset,
+    .set_ui_plane_follows_view = uevr::vr::set_ui_plane_follows_view,
 };
 
 

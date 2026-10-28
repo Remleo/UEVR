@@ -88,6 +88,33 @@ ScriptContext::~ScriptContext() {
     }*/
 }
 
+void ScriptContext::release_ui_planes() {
+    std::scoped_lock _{m_mtx};
+
+    if (m_plugin_initialize_param == nullptr || m_plugin_initialize_param->vr == nullptr) {
+        return;
+    }
+
+    const auto vr = m_plugin_initialize_param->vr;
+
+    if (m_used_secondary_ui_source) {
+        vr->set_secondary_ui_source(nullptr);
+
+        if (std::find(m_ui_planes.begin(), m_ui_planes.end(), 1u) == m_ui_planes.end()) {
+            m_ui_planes.push_back(1);
+        }
+
+        m_used_secondary_ui_source = false;
+    }
+
+    for (const auto plane : m_ui_planes) {
+        log(std::format("UI plane {} destroyed with the scripts that made it", plane));
+        vr->destroy_ui_plane(plane);
+    }
+
+    m_ui_planes.clear();
+}
+
 void ScriptContext::log(const std::string& message) {
     auto msg = std::format("[LuaVR] {}", message);
     OutputDebugStringA((msg + "\n").c_str());
@@ -581,12 +608,12 @@ int ScriptContext::setup_bindings() {
         "save_config", &UEVR_VRData::save_config,
         "reload_config", &UEVR_VRData::reload_config,
 
-        // The source for the secondary UI layer. Takes a texture object -- normally the RenderTarget a
-        // UWidgetComponent draws into -- or nil to take the layer away.
+        // The source for UI plane 1, the plane before planes were made on request. Takes a texture object --
+        // normally the RenderTarget a UWidgetComponent draws into -- or nil to take the layer away.
         //
         // Everything else about that layer is a UI_Secondary_* config value, so a script sets it through
         // set_mod_value like any other. Only the pointer needs a call of its own.
-        "set_secondary_ui_source", [](UEVR_VRData& self, sol::object obj) {
+        "set_secondary_ui_source", [this](UEVR_VRData& self, sol::object obj) {
             if (!obj.is<uevr::API::UObject*>()) {
                 self.set_secondary_ui_source(nullptr);
                 return;
@@ -596,6 +623,52 @@ int ScriptContext::setup_bindings() {
 
             lua::utility::check_self(source, L"set_secondary_ui_source");
             self.set_secondary_ui_source((UEVR_UObjectHandle)source);
+            m_used_secondary_ui_source = true;
+        },
+        // A UI plane of the script's own, with a swapchain the size of the game's interface -- the name says so, a
+        // plane of another size would be another call. Returns the plane, or nil when all four are taken.
+        //
+        // THE PLANE BELONGS TO THIS SCRIPT STATE and is destroyed when the scripts are reset: it lives in C++, and a
+        // reset would otherwise leave it behind, taking one of the four for good.
+        "create_ui_plane_sized_like_game_ui", [this](sol::this_state s, UEVR_VRData& self) -> sol::object {
+            const auto plane = self.create_ui_plane_sized_like_game_ui();
+
+            if (plane == 0) {
+                return sol::make_object(s, sol::nil);
+            }
+
+            m_ui_planes.push_back(plane);
+
+            return sol::make_object(s, plane);
+        },
+        "destroy_ui_plane", [this](UEVR_VRData& self, unsigned int plane) {
+            self.destroy_ui_plane(plane);
+            std::erase(m_ui_planes, plane);
+        },
+        // A texture for the plane -- normally the RenderTarget a UWidgetComponent draws into -- or nil to hide it.
+        "set_ui_plane_source", [](UEVR_VRData& self, unsigned int plane, sol::object obj) {
+            if (!obj.is<uevr::API::UObject*>()) {
+                self.set_ui_plane_source(plane, nullptr);
+                return;
+            }
+
+            const auto source = obj.as<uevr::API::UObject*>();
+
+            lua::utility::check_self(source, L"set_ui_plane_source");
+            self.set_ui_plane_source(plane, (UEVR_UObjectHandle)source);
+        },
+        // Where the plane hangs, the game plane's own settings one plane at a time. Metres throughout.
+        "set_ui_plane_distance", [](UEVR_VRData& self, unsigned int plane, float meters) {
+            self.set_ui_plane_distance(plane, meters);
+        },
+        "set_ui_plane_size", [](UEVR_VRData& self, unsigned int plane, float meters) {
+            self.set_ui_plane_size(plane, meters);
+        },
+        "set_ui_plane_offset", [](UEVR_VRData& self, unsigned int plane, float x, float y) {
+            self.set_ui_plane_offset(plane, x, y);
+        },
+        "set_ui_plane_follows_view", [](UEVR_VRData& self, unsigned int plane, bool follows) {
+            self.set_ui_plane_follows_view(plane, follows);
         },
         // Resize the game's FLAT window so its client area is exactly this, and return what it actually became --
         // two values, width then height, both zero if the window could not be reached.
