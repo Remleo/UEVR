@@ -1240,6 +1240,19 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
         const auto type = (OverlayComponent::OverlayType)m_parent->m_slate_overlay_type->value();
         const auto game_is_quad = type != OverlayComponent::OverlayType::CYLINDER || !vr->get_runtime()->is_cylinder_layer_allowed();
 
+        // Said on a change, so a cursor drawn but put somewhere else than the interface it points at shows in the log.
+        const auto placement = !game_is_quad ? 3 : (int)game.space;
+
+        if (placement != m_cursor_placement) {
+            m_cursor_placement = placement;
+
+            spdlog::info("[OverlayComponent] UEVR's cursor goes {}",
+                placement == 1 ? "on the game's interface plane, which is on the head" :
+                placement == 2 ? "on the game's interface plane, which is in the room" :
+                placement == 3 ? "by the rotation offset: the game's interface plane is curved" :
+                                 "by the rotation offset, NOT ON THE GAME'S INTERFACE: that plane was not submitted this frame");
+        }
+
         if (game.space != 0 && game_is_quad) {
             layer.space = game.space == 1 ? vr->m_openxr->view_space : vr->m_openxr->stage_space;
             layer.pose.orientation = runtimes::OpenXR::to_openxr(game.rotation);

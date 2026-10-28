@@ -282,6 +282,10 @@ private:
         XrCompositionLayerCylinderKHR m_slate_layer_cylinder{};
         XrCompositionLayerCylinderKHR m_slate_layer_cylinder_right{};
         XrCompositionLayerQuad m_framework_ui_layer{};
+
+        // Where the cursor's quad was put last with the menu closed, said on a change (generate_framework_ui_quad).
+        int m_cursor_placement{-1};
+
         OverlayComponent* m_parent{ nullptr };
         
         friend class OverlayComponent;
