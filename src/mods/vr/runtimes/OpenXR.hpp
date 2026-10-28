@@ -335,7 +335,11 @@ public:
 
     PipelineState last_submit_state{};
     PipelineState get_submit_state();
-    
+
+    // The orientation the frame about to be submitted was rendered for, while View Follows Aim holds its picture in the
+    // room; nothing otherwise. Read from the same record get_submit_state takes, without consuming it.
+    std::optional<glm::quat> peek_submit_anchor();
+
     const ModSlider::Ptr resolution_scale{ ModSlider::create("OpenXR_ResolutionScale", 0.1f, 3.0f, 1.0f) };
     const ModToggle::Ptr ignore_vd_checks{ ModToggle::create("OpenXR_IgnoreVirtualDesktopChecks", false) };
     bool push_dummy_projection{ false };

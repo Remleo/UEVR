@@ -929,11 +929,19 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
 
     auto glm_matrix = glm::identity<glm::mat4>();
     const auto held = m_parent->get_held_head(plane);
+    const auto follows_view = vr->m_overlay_component.m_ui_follows_view[plane]->value();
+
+    // A PLANE BOUND TO THE STAGE GOES WITH THE PICTURE while the view follows the aim, and the picture may be held in
+    // the room (View Follows Aim Anchor): then it stands at that frame's anchor, as the projection layer does. Put on
+    // the head instead, a reticle there travelled with every turn of the head while the picture stood where the aim put
+    // it (The Outer Worlds 2, through the sniper scope). A plane the player keeps on the head keeps it.
+    const auto picture = !held.has_value() && !follows_view && vr->is_view_following_aim()
+                         ? vr->m_openxr->peek_submit_anchor() : std::nullopt;
 
     // Held first: a script asked for the plane to stay where it hung on the headset (set_plane_held), and that
     // overrides both the binding and the aim.
     //
-    // Head locked while the view follows the aim, whatever the setting says.
+    // While the view follows the aim, where the picture is: held in the room, or on the head.
     //
     // The other branch anchors the quad in the stage through the rotation offset, which is taken once when
     // the aim takes over. Head movement then leaves the quad facing where the head used to be while the
@@ -942,7 +950,11 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     if (held.has_value()) {
         glm_matrix = *held;
         layer.space = vr->m_openxr->stage_space;
-    } else if (vr->m_overlay_component.m_ui_follows_view[plane]->value() || vr->is_view_following_aim()) {
+    } else if (picture.has_value()) {
+        glm_matrix = glm::mat4_cast(*picture);
+        glm_matrix[3] = glm::vec4{glm::vec3{vr->get_position(0)}, 1.0f};
+        layer.space = vr->m_openxr->stage_space;
+    } else if (follows_view || vr->is_view_following_aim()) {
         layer.space = vr->m_openxr->view_space;
     } else {
         auto rotation_offset = glm::inverse(vr->get_rotation_offset());
@@ -984,10 +996,11 @@ std::optional<std::reference_wrapper<XrCompositionLayerQuad>> OverlayComponent::
     //
     // Only for the layer anchored in the stage through the rotation offset. Head locked, its middle is already the
     // middle of the picture; the offsets below are the player's placement, and scaling them would just drag the UI
-    // around. Held, it is meant to stay put.
+    // around. Held, it is meant to stay put. Standing with the picture held in the room, it is on that picture's own
+    // axis, which magnification does not move.
     const auto zoom = vr->get_zoom_factor();
 
-    if (zoom > 1.0f && layer.space == vr->m_openxr->stage_space && !held.has_value()) {
+    if (zoom > 1.0f && layer.space == vr->m_openxr->stage_space && !held.has_value() && !picture.has_value()) {
         // Two frames are in play. The compositor will place this layer against the head, so the result has
         // to be expressed there; the picture inside it was rendered for the view rotation, so that is what
         // the offset is measured against. With the head still the two are the same rotation; once it turns,
